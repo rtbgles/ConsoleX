@@ -22,6 +22,7 @@ The upload is in the first commit, unchanged. The fixes are in the second commit
 | 10 | Low | **Server-console crash.** Typing `cnsx` in the server console indexed a NULL player. | Added a guard. |
 | 11 | Low | **Client error on an empty player list** (`data.rows[1]` when `rows` is nil). | Added a guard. |
 | 12 | Low | **Stale entries on disconnect.** The disconnect hook used a different session key than the rest of the code, and left remote requests pending. | Uses the same key everywhere and clears pending remote requests. |
+| 13 | **High** | **Changing the root or player dropdown threw a Lua error** (`attempt to index global 'listBtn'`). The dropdown handlers were created before `local listBtn` was declared, so they looked up a global that doesn't exist. This was already in 1.5.1. | `listBtn` is now declared before the handlers that use it. A scan of every global the addon reads found no other cases. |
 
 ## Risks you accept by design (not changed)
 

@@ -707,6 +707,9 @@ local function buildWindow()
         end
     end
 
+    -- forward-declared: the combo OnSelect handlers below are created before the button
+    local listBtn
+
     rootBox = vgui.Create( "DComboBox", left )
     rootBox:Dock( TOP )
     rootBox:SetTall( 22 )
@@ -742,7 +745,7 @@ local function buildWindow()
     nav:SetTall( 22 )
     nav.Paint = function() end
 
-    local listBtn = make( "CNSXButton", nav, "DButton" )
+    listBtn = make( "CNSXButton", nav, "DButton" )
     listBtn:Dock( LEFT )
     listBtn:SetWide( 60 )
     listBtn:SetText( "List" )
