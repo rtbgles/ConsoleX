@@ -1,0 +1,7 @@
+"AddonInfo"
+{
+	"name"		"ConsoleX"
+	"version"	"1.5.1"
+	"author"	"Boggle"
+	"info"		"Admin GLua IDE. CNSX."
+}
