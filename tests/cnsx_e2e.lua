@@ -342,9 +342,11 @@ ed._code = "print( 'saved' )"
 local combos = {}
 for _, p in ipairs( panels ) do if p.class == "DComboBox" then combos[#combos + 1] = p end end
 local rootBox, playerBox = combos[1], combos[2]
-local pathIdx
-for i, p in ipairs( panels ) do if p == playerBox then pathIdx = i + 1 end end
-local pathField = panels[pathIdx]
+local pathField
+local afterPlayer = false
+for _, p in ipairs( panels ) do
+    if p == playerBox then afterPlayer = true elseif afterPlayer and p.class == "DTextEntry" then pathField = p break end
+end
 pathField._text = "consolex/test.lua"
 button( "Save" ).DoClick() pump()
 check( "save writes server DATA as .lua.txt", SV._files["consolex/test.lua.txt"] == "print( 'saved' )" )
@@ -441,7 +443,32 @@ wait( 1 )
 CL._cmds.consolex() pump()
 check( "!cnsx restores a minimized window", fr._minBar == false )
 
--- 14. password commands
+-- 14. UI/UX (re-find widgets: the window was closed and rebuilt in step 11)
+combos = {}
+for _, p in ipairs( panels ) do if p.class == "DComboBox" then combos[#combos + 1] = p end end
+rootBox, playerBox = combos[#combos - 1], combos[#combos]
+tree = find( function( p ) return p.class == "DListView" end )
+afterPlayer, pathField = false, nil
+for _, p in ipairs( panels ) do
+    if p == playerBox then afterPlayer = true elseif afterPlayer and p.class == "DTextEntry" then pathField = p break end
+end
+check( "combos are self-drawn with the native label hidden", rootBox._meta == nil and rootBox.Paint ~= nil and playerBox._placeholder == "pick a player..." )
+rootBox:ChooseOption( "Server DATA", 1 ) pump()
+pathField._text = "consolex"
+pathField.OnEnter() pump()
+local fileLine
+for _, l in ipairs( tree._lines or {} ) do if l._path == "consolex/test.lua.txt" then fileLine = l end end
+check( "Enter in the path box lists the folder", fileLine ~= nil )
+local tabsTitles = {}
+local nTabs = 0
+for _, p in ipairs( panels ) do if p.valid ~= false and p.class == "CNSXButton" and p.DoMiddleClick then nTabs = nTabs + 1 end end
+tree.OnRowSelected( tree, 1, fileLine ) pump()
+tree.OnRowSelected( tree, 1, fileLine ) pump()
+check( "re-opening a file focuses its tab instead of duplicating", logText():find( "already open: consolex/test.lua.txt", 1, true ) ~= nil )
+check( "tabs can be closed with middle-click", nTabs > 0 )
+pathField._text = ""
+
+-- 15. password commands
 SV._cmds.cnsx_setpass( pleb, nil, { "x1234" } )
 check( "non-admin cnsx_setpass ignored", true )
 SV.CNSX.Auth = {}

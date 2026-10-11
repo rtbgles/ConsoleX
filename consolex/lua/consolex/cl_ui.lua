@@ -110,7 +110,11 @@ local function logLine( text, bad )
         return
     end
     local prefix = os.date( "%H:%M:%S " )
-    local all = logBox:GetText() .. prefix .. tostring( text ) .. "\n"
+    text = tostring( text )
+    if bad and not string.find( text, "^ERR" ) then
+        text = "[!] " .. text
+    end
+    local all = logBox:GetText() .. prefix .. text .. "\n"
     if #all > LOG_MAX then
         all = string.sub( all, -LOG_MAX )
     end
@@ -160,6 +164,9 @@ local function applyBody( body )
         return
     end
     editor:RunJavascript( "if(window.cnsxSetObj)cnsxSetObj(" .. CNSX.Encode( { c = body or "" } ) .. ")" )
+    local tab = current()
+    local mode = CNSX.Modes[tab and tab.mode or "lua"] or "ace/mode/lua"
+    editor:RunJavascript( "if(window.cnsxMode)cnsxMode(" .. jsQuote( mode ) .. ")" )
 end
 
 local function pullBody( cb )
@@ -199,6 +206,15 @@ local function selectTab( i )
 end
 
 local function addTab( title, body, path, root, mode )
+    if path and path ~= "" then
+        for i, tab in ipairs( tabs ) do
+            if tab.path == path and tab.root == ( root or "data" ) then
+                logLine( "already open: " .. path .. " (close the tab to reload it)" )
+                selectTab( i )
+                return
+            end
+        end
+    end
     tabs[#tabs + 1] = {
         title = title or "untitled.lua",
         body = body or "-- CNSX\nprint('hello')\n",
@@ -246,7 +262,9 @@ local function fillTree( rows, path )
             col:SetTextColor( Color( 220, 230, 255 ) )
         end
     end
-    tint( tree:AddLine( ".." ) )
+    if ( path or "" ) ~= "" then
+        tint( tree:AddLine( ".." ) )
+    end
     if not rows or #rows == 0 then
         local empty = tree:AddLine( "(empty — hit List)" )
         empty._empty = true
@@ -350,6 +368,7 @@ local function openPrefs()
     local prefs = loadPrefs()
     local win = vgui.Create( vgui.GetControlTable( "CNSXFrame" ) and "CNSXFrame" or "DFrame" )
     win:SetSize( 380, 340 )
+    win._subtitle = "preferences"
     win:Center()
     win:SetTitle( "" )
     win:ShowCloseButton( true )
@@ -574,6 +593,11 @@ local function buildWindow()
         end
         persist()
         setBusy( false )
+        if not frame._maxed and not minimized then
+            local p = CNSX.Prefs or loadPrefs()
+            p.w, p.h = frame:GetWide(), frame:GetTall()
+            savePrefs()
+        end
         frame._closing = true
         if isfunction( frame.AlphaTo ) then
             local closing = frame
@@ -712,7 +736,8 @@ local function buildWindow()
         for i, tab in ipairs( tabs ) do
             local b = make( "CNSXButton", tabList, "DButton" )
             b:SetWide( 130 )
-            b:SetText( string.sub( tab.title, 1, 18 ) )
+            b:SetText( string.sub( tostring( tab.title or "untitled" ), 1, 18 ) )
+            b:SetTooltip( ( tab.root or "data" ) .. " / " .. ( tab.path ~= "" and tab.path or "(unsaved)" ) .. "\nright-click or middle-click to close" )
             if i == active then
                 b:SetKind( "on" )
             end
@@ -722,6 +747,7 @@ local function buildWindow()
             b.DoRightClick = function()
                 closeTab( i )
             end
+            b.DoMiddleClick = b.DoRightClick
             tabList:AddPanel( b )
         end
     end
@@ -744,9 +770,12 @@ local function buildWindow()
     -- forward-declared: the combo OnSelect handlers below are created before the button
     local listBtn
 
+    CNSX.FieldLabel( left, "Browse" )
     rootBox = vgui.Create( "DComboBox", left )
     rootBox:Dock( TOP )
-    rootBox:SetTall( 22 )
+    rootBox:SetTall( 24 )
+    rootBox:SetSortItems( false )
+    rootBox:SetTooltip( "Where the file list, Save and Inc point" )
     rootBox:AddChoice( "Server DATA", "data", true )
     rootBox:AddChoice( "Server GAME", "game" )
     rootBox:AddChoice( "Server LUA", "lua" )
@@ -754,11 +783,12 @@ local function buildWindow()
     rootBox:AddChoice( "Player DATA", "remote" )
     CNSX.SkinCombo( rootBox )
 
+    CNSX.FieldLabel( left, "Target player (Player DATA / On Ply)" )
     playerBox = vgui.Create( "DComboBox", left )
     playerBox:Dock( TOP )
-    playerBox:SetTall( 22 )
-    playerBox:SetValue( "player" )
-    CNSX.SkinCombo( playerBox )
+    playerBox:SetTall( 24 )
+    playerBox:SetTooltip( "Superadmin used by Player DATA and On Ply. Refresh updates the list." )
+    CNSX.SkinCombo( playerBox, "pick a player..." )
     rootBox.OnSelect = function()
         listBtn.DoClick()
     end
@@ -768,11 +798,15 @@ local function buildWindow()
         end
     end
 
+    CNSX.FieldLabel( left, "Path (Enter to list)" )
     pathEntry = vgui.Create( "DTextEntry", left )
     pathEntry:Dock( TOP )
     pathEntry:SetTall( 22 )
-    pathEntry:SetPlaceholderText( "path" )
+    pathEntry:SetPlaceholderText( "folder or file path" )
     CNSX.SkinEntry( pathEntry )
+    pathEntry.OnEnter = function()
+        listBtn.DoClick()
+    end
 
     local nav = vgui.Create( "DPanel", left )
     nav:Dock( TOP )
@@ -783,6 +817,7 @@ local function buildWindow()
     listBtn:Dock( LEFT )
     listBtn:SetWide( 60 )
     listBtn:SetText( "List" )
+    listBtn:SetTooltip( "List the folder in the Path box" )
     listBtn.DoClick = function()
         local root = comboData( rootBox ) or "data"
         setStatus( "listing " .. root )
@@ -817,6 +852,7 @@ local function buildWindow()
     saveBtn:Dock( LEFT )
     saveBtn:SetWide( 60 )
     saveBtn:SetText( "Save" )
+    saveBtn:SetTooltip( "Save the editor to the Path box (DATA only; .lua is saved as .lua.txt)" )
     saveBtn.DoClick = function()
         pullBody( function( code )
             local tab = current()
@@ -935,13 +971,30 @@ local function buildWindow()
     actions:Dock( TOP )
     actions:SetTall( 26 )
 
+    local ACT_TIPS = {
+        ["Check"] = "Compile on the server without running",
+        ["SV Run"] = "Run the editor code on the server",
+        ["CL Me"] = "Run the editor code on your own client",
+        ["CL All"] = "Run the editor code on every superadmin's client",
+        ["On Ply"] = "Run the editor code on the target player (must be superadmin)",
+        ["Both"] = "Run on the server and on every superadmin's client",
+        ["Inc"] = "Run the server file in the Path box",
+        ["Cmd"] = "Run the editor's first non-comment line as a server console command",
+        ["Refresh"] = "Reload the player list and the file list"
+    }
+    local ACT_DANGER = { ["CL All"] = true, ["Both"] = true, ["Cmd"] = true }
+
+    -- the result already plays a pass/fail sound, so no click sound here
     local function act( label, fn )
         local b = make( "CNSXButton", actions, "DButton" )
         b:SetWide( 72 )
         actions:AddPanel( b )
         b:SetText( label )
+        b:SetTooltip( ACT_TIPS[label] )
+        if ACT_DANGER[label] and b.SetKind then
+            b:SetKind( "danger" )
+        end
         b.DoClick = function()
-            sfx( "buttons/button14.wav" )
             fn()
         end
         return b

@@ -6,7 +6,7 @@ The upload is in the first commit, unchanged. Each later commit is one audit rou
 
 **How it was checked:** I read every file by hand. I ran every file through LuaJIT (`luajit -bl`), which is the Lua runtime GMod uses, to check that it compiles. I ran a GMod API checker over all the code to catch misspelled or nonexistent functions. Finally, I ran a smoke test of the server logic in plain LuaJIT, with fake versions of the GMod functions. It covered first-time setup, a wrong password, unlocking, session expiry, upgrading an old password hash, the `cnsx_setpass` fix, `run_sv`, refusals for non-superadmin targets, and refusals for non-admin senders. Nothing was tested on a live server.
 
-**Round 3 (full functional audit):** I read every line of the client UI against the base-game Derma source (`DFrame`, `DComboBox`, `DHTML`, `DHorizontalScroller`, `DListView`) and the wiki. I then wrote `tests/cnsx_e2e.lua`. It loads the real server files and the real client files into two separate simulated GMod environments, connects them with a fake network, and clicks through the IDE. It has 40 checks: unlock, run, save, list, open, Cmd, client pushes, Inc, the log click, tabs, close and reopen, expiry, minimize and maximize, and the password commands. Run it with `luajit tests/cnsx_e2e.lua` from the repo root. Against the code from before round 3, it fails at the first unlock step, because the password prompt never appeared.
+**Round 3 (full functional audit):** I read every line of the client UI against the base-game Derma source (`DFrame`, `DComboBox`, `DHTML`, `DHorizontalScroller`, `DListView`) and the wiki. I then wrote `tests/cnsx_e2e.lua`. It loads the real server files and the real client files into two separate simulated GMod environments, connects them with a fake network, and clicks through the IDE. It now has 44 checks: unlock, run, save, list, open, Cmd, client pushes, Inc, the log click, tabs, close and reopen, expiry, minimize and maximize, and the password commands. Run it with `luajit tests/cnsx_e2e.lua` from the repo root. Against the code from before round 3, it fails at the first unlock step, because the password prompt never appeared.
 
 ## Findings
 
@@ -42,6 +42,24 @@ The upload is in the first commit, unchanged. Each later commit is one audit rou
 | 23 | Low | **Dropdowns drew their text twice** (the built-in label plus a custom `Paint`, in different fonts) and showed two arrows. | `Paint` now only draws the background. |
 | 24 | Low | **Typing in the first second after opening could be overwritten.** A redundant `loadtabs` request replaced tabs that had already arrived with `CNSX_Open`. | Removed it. |
 | 25 | Low | Clicking the "(empty)" row navigated up a folder. Inc accepted the My DATA and Player DATA roots, which don't exist on the server. Refresh reset the chosen player. Successful remote saves were never reported. The log grew without limit. Closing the window right after reopening could close the new one. Clients that received code from "CL All" got no notice. | Each one is fixed. The log is capped at 24 KB, and receiving clients print a console line. |
+
+### Round 4: UI / UX
+
+| # | Issue | Fix |
+|---|-------|-----|
+| 26 | **The Browse and Player dropdowns were effectively invisible until clicked.** Their background (34,34,40) was almost the same as the panel behind them (24,24,28), with no border, and the readable text depended on the skin. | They're now fully drawn by CNSX: a dark field with a border that turns blue on hover, the selected text (or a grey "pick a player..." prompt), and a chevron that flips when open. |
+| 27 | Unlabelled controls: two unnamed dropdowns and a "path" box. | Added small captions: *Browse*, *Target player (Player DATA / On Ply)*, *Path (Enter to list)*. Added tooltips on every dropdown and button. |
+| 28 | The Browse list was sorted alphabetically, so "My DATA" came first. | Kept in logical order: Server DATA / GAME / LUA, then My DATA, Player DATA. |
+| 29 | Short labels with no explanation: "CL Me", "On Ply", "Both", "Inc", "Cmd". | Each action has a tooltip. The ones that reach other people or the console (CL All, Both, Cmd) use the darker "danger" style. |
+| 30 | Clicking a file twice opened duplicate tabs. | It switches to the tab that's already open and says so in the log. |
+| 31 | Closing a tab only worked with an undocumented right-click. | The tab tooltip shows its location and path and says "right-click or middle-click to close". Middle-click also works now. |
+| 32 | The editor stayed in Lua highlighting for JSON, HTML and other files. | The highlighting follows the active tab's file type. |
+| 33 | Errors in the log looked the same as successes (the "bad" flag was ignored). | Failure lines get a `[!]` prefix. |
+| 34 | Pressing Enter in the path box did nothing. | Enter lists that folder. |
+| 35 | A ".." row showed at the top level. | It's hidden when there's no parent folder. |
+| 36 | A window resized by dragging went back to the old size next time. | The size is saved when you close it. |
+| 37 | Every action played a click *and then* a pass/fail sound. | Only the pass/fail sound plays. |
+| 38 | The header said "owner", including on the preferences window. | It shows the version, and the preferences window says "preferences". |
 
 ## Risks you accept by design (not changed)
 

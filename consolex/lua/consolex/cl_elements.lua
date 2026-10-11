@@ -100,16 +100,55 @@ function CNSX.SkinList( list )
     end
 end
 
-function CNSX.SkinCombo( box )
+local COMBO_HIDDEN = Color( 0, 0, 0, 0 )
+
+-- fully self-drawn: background + border + label + chevron, so the box is visible on the dark panel
+-- whatever the skin does (the old version relied on a fill nearly identical to the panel behind it)
+function CNSX.SkinCombo( box, placeholder )
     if not IsValid( box ) then
         return
     end
-    box:SetTextColor( T.text )
+    box._placeholder = placeholder
     box:SetFont( "CNSX_Body" )
+    box:SetTextColor( COMBO_HIDDEN )
+    if IsValid( box.DropButton ) then
+        box.DropButton:SetVisible( false )
+    end
     box.Paint = function( self, w, h )
-        draw.RoundedBox( 4, 0, 0, w, h, T.raised )
+        local open = self:IsMenuOpen()
+        local hot = open or self:IsHovered()
+        draw.RoundedBox( 4, 0, 0, w, h, hot and T.raised or T.bg )
+        surface.SetDrawColor( hot and T.accent or T.hair )
+        surface.DrawOutlinedRect( 0, 0, w, h )
+        local label = self:GetText() or ""
+        local col = T.text
+        if label == "" then
+            label = self._placeholder or ""
+            col = T.muted
+        end
+        draw.SimpleText( label, "CNSX_Body", 8, h * 0.5, col, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
+        local cx, cy = w - 12, h * 0.5
+        surface.SetDrawColor( hot and T.text or T.muted )
+        if open then
+            surface.DrawLine( cx - 4, cy + 2, cx, cy - 2 )
+            surface.DrawLine( cx, cy - 2, cx + 4, cy + 2 )
+        else
+            surface.DrawLine( cx - 4, cy - 2, cx, cy + 2 )
+            surface.DrawLine( cx, cy + 2, cx + 4, cy - 2 )
+        end
         return true
     end
+end
+
+function CNSX.FieldLabel( parent, text )
+    local lab = vgui.Create( "DLabel", parent )
+    lab:Dock( TOP )
+    lab:DockMargin( 2, 4, 0, 1 )
+    lab:SetTall( 14 )
+    lab:SetFont( "CNSX_Tiny" )
+    lab:SetText( text )
+    lab:SetTextColor( T.muted )
+    return lab
 end
 
 local function round( r, x, y, w, h, col )
@@ -346,7 +385,7 @@ function FRAME:Paint( w, h )
     surface.DrawOutlinedRect( 0, 0, w, minBar and h or 36 )
     CNSX.DrawLogo( 8, 2, minBar and 120 or 168, minBar and 24 or 32 )
     if not minBar then
-        draw.SimpleText( "owner", "CNSX_Tiny", 184, 19, Color( 160, 190, 240 ), TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
+        draw.SimpleText( self._subtitle or ( "v" .. tostring( CNSX.Version ) ), "CNSX_Tiny", 184, 19, Color( 160, 190, 240 ), TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
     else
         draw.SimpleText( "CNSX  hold C and click (or !cnsx) to restore", "CNSX_Tiny", 140, h * 0.5, T.muted, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
     end
