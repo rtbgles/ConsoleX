@@ -171,9 +171,7 @@ function CNSX.AttachEditor( html )
 end
 
 function CNSX.SetCode( html, body )
-    body = string.gsub( tostring( body or "" ), "\\", "\\\\" )
-    body = string.gsub( body, "`", "\\`" )
-    body = string.gsub( body, "\r", "" )
+    body = string.gsub( tostring( body or "" ), "\r", "" )
     html:RunJavascript( "if(window.cnsxSet)cnsxSet(" .. util.TableToJSON( { tostring( body or "" ) } ):sub( 2, -2 ) .. ")" )
 end
 

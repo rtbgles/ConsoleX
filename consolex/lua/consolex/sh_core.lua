@@ -1,5 +1,5 @@
 CNSX = CNSX or {}
-CNSX.Version = "1.5.1"
+CNSX.Version = "1.5.2"
 CNSX.MaxNet = 62000
 CNSX.MaxCode = 62000
 
@@ -68,8 +68,4 @@ function CNSX.Decode( raw )
         return {}
     end
     return data
-end
-
-if SERVER then
-    -- network strings registered at top
 end

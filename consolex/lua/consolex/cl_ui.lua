@@ -1071,7 +1071,7 @@ net.Receive( "CNSX_Out", function()
             for _, row in ipairs( data.rows or {} ) do
                 playerBox:AddChoice( row.nick, row.sid )
             end
-            if playerBox:GetSelectedID() == nil and data.rows[1] then
+            if playerBox:GetSelectedID() == nil and istable( data.rows ) and data.rows[1] then
                 playerBox:ChooseOption( data.rows[1].nick, 1 )
             end
         end
@@ -1116,9 +1116,13 @@ net.Receive( "CNSX_RunCl", function()
 end )
 
 net.Receive( "CNSX_Remote", function()
+    -- mirror the CNSX_RunCl rule: only superadmins expose their files to remote browsing
+    if not LocalPlayer():IsSuperAdmin() then
+        return
+    end
     local data = CNSX.Decode( net.ReadString() )
     local out = { admin = data.admin, path = data.path }
-    local root = data.root == "game" and "GAME" or "DATA"
+    local root = "DATA"
     if data.act == "remote_list" then
         local path = CNSX.SanitizePath( data.path )
         local wildcard = path == "" and "*" or ( path .. "/*" )
