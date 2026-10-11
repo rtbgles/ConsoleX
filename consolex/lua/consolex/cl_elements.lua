@@ -105,11 +105,9 @@ function CNSX.SkinCombo( box )
         return
     end
     box:SetTextColor( T.text )
+    box:SetFont( "CNSX_Body" )
     box.Paint = function( self, w, h )
         draw.RoundedBox( 4, 0, 0, w, h, T.raised )
-        local label = self:GetSelected() or self:GetValue() or ""
-        draw.SimpleText( label, "CNSX_Body", 8, h * 0.5, T.text, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
-        draw.SimpleText( "v", "CNSX_Tiny", w - 10, h * 0.5, T.muted, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER )
         return true
     end
 end
@@ -281,13 +279,20 @@ function FRAME:Init()
     self._dragOff = nil
 end
 
+local RESIZE_GRIP = 20
+
 function FRAME:OnMousePressed( code )
     if code ~= MOUSE_LEFT then
         return
     end
-    self:MouseCapture( true )
     self:MoveToFront()
     local cx, cy = self:CursorPos()
+    -- bottom-right grip goes to DFrame, which owns SetSizable resizing
+    if self:GetSizable() and not self._maxed and not self._minBar and cx > self:GetWide() - RESIZE_GRIP and cy > self:GetTall() - RESIZE_GRIP then
+        DFrame.OnMousePressed( self, code )
+        return
+    end
+    self:MouseCapture( true )
     if self._minBar then
         if isfunction( self._restore ) then
             self._restore()
@@ -300,7 +305,7 @@ function FRAME:OnMousePressed( code )
 end
 
 function FRAME:OnMouseReleased( code )
-    self:MouseCapture( false )
+    DFrame.OnMouseReleased( self, code )
     self._dragOff = nil
 end
 
@@ -343,7 +348,7 @@ function FRAME:Paint( w, h )
     if not minBar then
         draw.SimpleText( "owner", "CNSX_Tiny", 184, 19, Color( 160, 190, 240 ), TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
     else
-        draw.SimpleText( "CNSX  click to restore", "CNSX_Tiny", 140, h * 0.5, T.muted, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
+        draw.SimpleText( "CNSX  hold C and click (or !cnsx) to restore", "CNSX_Tiny", 140, h * 0.5, T.muted, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
     end
     draw.SimpleText( os.date( "%H:%M:%S" ), "CNSX_Tiny", w - 128, minBar and h * 0.5 or 19, Color( 140, 170, 220 ), TEXT_ALIGN_RIGHT, TEXT_ALIGN_CENTER )
     local flash = CNSX._flash

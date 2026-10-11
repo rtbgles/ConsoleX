@@ -103,12 +103,18 @@ local function loadLocalSession()
     end
 end
 
+local LOG_MAX = 24000
+
 local function logLine( text, bad )
     if not IsValid( logBox ) then
         return
     end
     local prefix = os.date( "%H:%M:%S " )
-    logBox:SetText( logBox:GetText() .. prefix .. tostring( text ) .. "\n" )
+    local all = logBox:GetText() .. prefix .. tostring( text ) .. "\n"
+    if #all > LOG_MAX then
+        all = string.sub( all, -LOG_MAX )
+    end
+    logBox:SetText( all )
     logBox:SetCaretPos( #logBox:GetText() )
 end
 
@@ -122,8 +128,12 @@ local function setStatus( text )
     end
 end
 
+local function editorReady()
+    return IsValid( editor ) and editor._ready == true
+end
+
 local function editorJS( code )
-    if IsValid( editor ) then
+    if editorReady() then
         editor:RunJavascript( code )
     end
 end
@@ -146,14 +156,14 @@ local function findNext( needle, back )
 end
 
 local function applyBody( body )
-    if not IsValid( editor ) then
+    if not editorReady() then
         return
     end
     editor:RunJavascript( "if(window.cnsxSetObj)cnsxSetObj(" .. CNSX.Encode( { c = body or "" } ) .. ")" )
 end
 
 local function pullBody( cb )
-    if not IsValid( editor ) then
+    if not editorReady() then
         cb( current() and current().body or "" )
         return
     end
@@ -238,7 +248,9 @@ local function fillTree( rows, path )
     end
     tint( tree:AddLine( ".." ) )
     if not rows or #rows == 0 then
-        tint( tree:AddLine( "(empty — hit List)" ) )
+        local empty = tree:AddLine( "(empty — hit List)" )
+        empty._empty = true
+        tint( empty )
     end
     for _, row in ipairs( rows or {} ) do
         local line = tree:AddLine( ( row.dir and "[dir] " or "" ) .. ( row.name or row.path or "" ) )
@@ -278,8 +290,15 @@ local function showLock( info )
     ent:DockMargin( 16, 8, 16, 0 )
     ent:SetTall( 28 )
     ent:SetPlaceholderText( "password" )
-    if ent.SetPaintBackgroundEnabled then
-        -- keep
+    -- DTextEntry has no password mode; paint bullets instead of the text so it isn't shown on screen/stream
+    ent.Paint = function( self, w, h )
+        draw.RoundedBox( 4, 0, 0, w, h, Color( 16, 16, 18 ) )
+        surface.SetDrawColor( self:HasFocus() and Color( 56, 110, 220 ) or Color( 58, 58, 66 ) )
+        surface.DrawOutlinedRect( 0, 0, w, h )
+        local len = #( self:GetText() or "" )
+        local shown = len > 0 and string.rep( "*", len ) or ( self:HasFocus() and "" or "password" )
+        draw.SimpleText( shown, "DermaDefault", 6, h * 0.5, len > 0 and Color( 230, 238, 255 ) or Color( 140, 140, 148 ), TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
+        return true
     end
     local go = vgui.Create( "DButton", win )
     go:Dock( BOTTOM )
@@ -430,8 +449,15 @@ local function openPrefs()
 end
 
 local function buildWindow()
+    if IsValid( frame ) and frame._closing then
+        frame:Remove()
+        frame = nil
+    end
     if IsValid( frame ) then
         frame:SetVisible( true )
+        if minimized and isfunction( frame._restore ) then
+            frame._restore()
+        end
         frame:MakePopup()
         setBusy( true )
         return
@@ -503,8 +529,7 @@ local function buildWindow()
             frame:SetSize( ScrW(), 28 )
             frame:SetSizable( false )
             frame:SetKeyboardInputEnabled( false )
-            frame:SetMouseInputEnabled( true )
-            gui.EnableScreenClicker( false )
+            frame:SetMouseInputEnabled( false )
             persist()
         else
             frame:SetSizable( true )
@@ -526,7 +551,9 @@ local function buildWindow()
         setMinimized( not minimized )
     end )
     maxBtn = chromeBtn( "max", 36, function()
-        minimized = false
+        if minimized then
+            setMinimized( false )
+        end
         if frame._maxed then
             frame._maxed = false
             maxBtn:SetGlyph( "max" )
@@ -542,14 +569,21 @@ local function buildWindow()
         end
     end )
     chromeBtn( "close", 72, function()
+        if frame._closing then
+            return
+        end
         persist()
         setBusy( false )
+        frame._closing = true
         if isfunction( frame.AlphaTo ) then
-            frame:AlphaTo( 0, 0.15, 0, function()
-                if IsValid( frame ) then
-                    frame:Close()
+            local closing = frame
+            closing:AlphaTo( 0, 0.15, 0, function()
+                if IsValid( closing ) then
+                    closing:Close()
                 end
-                frame = nil
+                if frame == closing then
+                    frame = nil
+                end
             end )
         else
             frame:Close()
@@ -792,26 +826,29 @@ local function buildWindow()
             tab.body = code
             local path = pathEntry:GetValue()
             if path == "" then
-                path = "consolex/scratch.lua"
+                path = "consolex/scratch.txt"
             end
             tab.path = path
-            tab.title = string.GetFileFromFilename( path )
             local root = comboData( rootBox ) or "data"
             if root == "mine" then
-                local folder = string.GetPathFromFilename( path )
-                if folder and folder ~= "" then
-                    file.CreateDir( string.TrimRight( folder, "/" ) )
-                end
-                file.Write( path, code )
-                logLine( "saved local DATA/" .. path )
+                local ok, final, err = CNSX.WriteData( path, code )
+                logLine( ok and ( "saved local DATA/" .. final ) or ( "local save failed: " .. tostring( err ) ), not ok )
             elseif root == "remote" then
                 local sid = comboData( playerBox )
+                if not sid then
+                    logLine( "pick a player first", true )
+                    return
+                end
                 send( "remote_write", { sid = sid, path = path, body = code } )
-                logLine( "saving to player DATA/" .. path )
+                logLine( "saving to player DATA/" .. CNSX.WritablePath( path ) )
             else
+                if root ~= "data" then
+                    logLine( "GAME/LUA are read-only; saving a copy to server DATA instead" )
+                end
                 send( "write", { path = path, body = code } )
-                logLine( "saving server DATA/" .. path )
+                logLine( "saving server DATA/" .. CNSX.WritablePath( path ) )
             end
+            tab.title = string.GetFileFromFilename( path )
             persist()
         end )
     end
@@ -822,6 +859,9 @@ local function buildWindow()
     tree:SetHideHeaders( true )
     CNSX.SkinList( tree )
     tree.OnRowSelected = function( _, _, line )
+        if line._empty then
+            return
+        end
         local path = line._path
         if not path then
             local cur = CNSX.SanitizePath( pathEntry:GetValue() )
@@ -856,13 +896,33 @@ local function buildWindow()
     editor = vgui.Create( "DHTML", right )
     editor:Dock( FILL )
     CNSX.AttachEditor( editor )
-    editor:SetHTML( CNSX.EditorHTML( "lua" ) )
-    editor:AddFunction( "cnsx", "code", function( val )
-        if isfunction( editor._cb ) then
-            editor._cb( tostring( val or "" ) )
-            editor._cb = nil
+    editor.OnDocumentReady = function( self )
+        self:AddFunction( "cnsx", "code", function( val )
+            if isfunction( self._cb ) then
+                self._cb( tostring( val or "" ) )
+                self._cb = nil
+            end
+        end )
+        -- Ace swallows keys while focused, so its own bindings forward Ctrl+F/G/H and Esc here
+        self:AddFunction( "cnsx", "hotkey", function( key )
+            if not IsValid( frame ) then
+                return
+            end
+            if key == "find" then
+                frame._showFind( false )
+            elseif key == "line" then
+                frame._showFind( true )
+            elseif key == "esc" then
+                frame._hideFind()
+            end
+        end )
+        self._ready = true
+        local tab = current()
+        if tab then
+            applyBody( tab.body or "" )
         end
-    end )
+    end
+    editor:SetHTML( CNSX.EditorHTML( "lua" ) )
 
     local bottom = vgui.Create( "DPanel", right )
     bottom:Dock( BOTTOM )
@@ -918,14 +978,22 @@ local function buildWindow()
         end )
     end )
     act( "Inc", function()
-        local _, root = rootBox:GetSelected()
-        send( "include", { path = pathEntry:GetValue(), root = root or "data" } )
+        local root = comboData( rootBox ) or "data"
+        if root == "mine" or root == "remote" then
+            logLine( "Inc runs a server file; pick Server DATA/GAME/LUA", true )
+            return
+        end
+        send( "include", { path = pathEntry:GetValue(), root = root } )
     end )
     act( "Cmd", function()
         pullBody( function( code )
-            local cmd = pathEntry:GetValue()
-            if cmd == "" then
-                cmd = string.match( code or "", "^([^\r\n]+)" ) or ""
+            local cmd = ""
+            for line in string.gmatch( code or "", "[^\r\n]+" ) do
+                line = string.Trim( line )
+                if line ~= "" and string.sub( line, 1, 2 ) ~= "--" and string.sub( line, 1, 2 ) ~= "//" then
+                    cmd = line
+                    break
+                end
             end
             send( "cmd", { cmd = cmd } )
         end )
@@ -947,6 +1015,7 @@ local function buildWindow()
         local caret = self:GetCaretPos() or #text
         local prefix = string.sub( text, 1, caret )
         local cur = string.match( prefix, "([^\n]*)$" ) or ""
+        cur = string.gsub( cur, "^%d+:%d+:%d+%s*", "" )
         local n = CNSX.ParseErrLine( cur )
         if n then
             gotoLine( n )
@@ -975,8 +1044,10 @@ local function buildWindow()
             if self:GetWide() ~= ScrW() or self:GetTall() ~= 28 then
                 self:SetSize( ScrW(), 28 )
             end
-            local _, my = input.GetCursorPos()
-            gui.EnableScreenClicker( my <= 32 )
+            local wantMouse = IsValid( g_ContextMenu ) and g_ContextMenu:IsVisible()
+            if self:IsMouseInputEnabled() ~= wantMouse then
+                self:SetMouseInputEnabled( wantMouse )
+            end
         end
         if IsValid( body ) then
             body:SetVisible( not minimized )
@@ -984,7 +1055,6 @@ local function buildWindow()
     end
 
     send( "players", {} )
-    send( "loadtabs", {} )
     timer.Simple( 0.15, function()
         if IsValid( listBtn ) then
             listBtn.DoClick()
@@ -1040,19 +1110,17 @@ net.Receive( "CNSX_Out", function()
         return
     end
     if data.kind == "lock" then
-        if data.unlocked or IsValid( frame ) then
+        if data.unlocked or data.deny then
             if IsValid( CNSX._lock ) then
                 CNSX._lock:Close()
             end
             return
         end
-        if data.deny then
-            showLock( data )
-        end
+        showLock( data )
         return
     end
     if data.kind == "saved" then
-        logLine( data.ok and ( "wrote " .. tostring( data.path ) ) or tostring( data.err ) )
+        logLine( data.ok and ( "wrote " .. tostring( data.path ) ) or ( "save failed: " .. tostring( data.err ) ), not data.ok )
         return
     end
     if data.kind == "run" then
@@ -1070,12 +1138,17 @@ net.Receive( "CNSX_Out", function()
     end
     if data.kind == "players" then
         if IsValid( playerBox ) then
+            local keep = comboData( playerBox )
             playerBox:Clear()
-            for _, row in ipairs( data.rows or {} ) do
+            local pick = 1
+            for i, row in ipairs( data.rows or {} ) do
                 playerBox:AddChoice( row.nick, row.sid )
+                if row.sid == keep then
+                    pick = i
+                end
             end
-            if playerBox:GetSelectedID() == nil and istable( data.rows ) and data.rows[1] then
-                playerBox:ChooseOption( data.rows[1].nick, 1 )
+            if istable( data.rows ) and data.rows[pick] then
+                playerBox:ChooseOption( data.rows[pick].nick, pick )
             end
         end
         return
@@ -1098,6 +1171,9 @@ net.Receive( "CNSX_Out", function()
             addTab( ( data.from or "ply" ) .. "_" .. string.GetFileFromFilename( data.path or "file" ), data.body, data.path, "remote", CNSX.GuessMode( data.path ) )
             logLine( "remote file " .. tostring( data.path ) )
         end
+        if data.ok ~= nil then
+            logLine( data.ok and ( "wrote player DATA/" .. tostring( data.path ) ) or "remote save failed", not data.ok )
+        end
         if data.err then
             logLine( data.err, true )
         end
@@ -1109,6 +1185,7 @@ net.Receive( "CNSX_RunCl", function()
         return
     end
     local code = net.ReadString()
+    print( "[CNSX] running " .. #code .. " bytes of Lua pushed by a superadmin (see server audit log)" )
     local fn, err = CompileString( code, "CNSX-CL", false )
     if not isfunction( fn ) then
         logLine( tostring( fn or err ), true )
@@ -1145,18 +1222,10 @@ net.Receive( "CNSX_Remote", function()
             out.err = "truncated"
         end
     elseif data.act == "remote_write" then
-        local path = CNSX.SanitizePath( data.path )
-        if path == "" then
-            out.err = "bad path"
-        else
-            local folder = string.GetPathFromFilename( path )
-            if folder and folder ~= "" then
-                file.CreateDir( string.TrimRight( folder, "/" ) )
-            end
-            file.Write( path, tostring( data.body or "" ) )
-            out.ok = file.Exists( path, "DATA" )
-            out.err = out.ok and nil or "write failed"
-        end
+        local ok, path, err = CNSX.WriteData( data.path, data.body )
+        out.ok = ok
+        out.path = path
+        out.err = err
     end
     net.Start( "CNSX_RemoteOut" )
         net.WriteString( CNSX.Encode( out ) )
@@ -1164,10 +1233,6 @@ net.Receive( "CNSX_Remote", function()
 end )
 
 concommand.Add( "consolex", function()
-    if IsValid( CNSX._lock ) then
-        CNSX._lock:Close()
-    end
-    buildWindow()
     net.Start( "CNSX_Auth" )
         net.WriteUInt( 0, 2 )
         net.WriteString( "" )
@@ -1189,21 +1254,3 @@ hook.Add( "OnPlayerChat", "CNSX_ChatOpen", function( ply, text )
 end )
 
 loadPrefs()
-
-hook.Add( "PlayerButtonDown", "CNSX_EditKeys", function( ply, btn )
-    if ply ~= LocalPlayer() or not IsValid( frame ) then
-        return
-    end
-    if btn == KEY_ESCAPE and isfunction( frame._hideFind ) then
-        frame._hideFind()
-        return
-    end
-    if not input.IsButtonDown( KEY_LCONTROL ) and not input.IsButtonDown( KEY_RCONTROL ) then
-        return
-    end
-    if ( btn == KEY_F or btn == KEY_H ) and isfunction( frame._showFind ) then
-        frame._showFind( false )
-    elseif btn == KEY_G and isfunction( frame._showFind ) then
-        frame._showFind( true )
-    end
-end )

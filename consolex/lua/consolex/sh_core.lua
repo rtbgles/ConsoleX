@@ -46,6 +46,44 @@ function CNSX.SanitizePath( path )
     return path
 end
 
+-- file.Write refuses anything outside this list (notably .lua), so such saves get ".txt" appended
+CNSX.WriteExts = {
+    txt = true, dat = true, json = true, xml = true, csv = true, dem = true, vcd = true,
+    vtf = true, vmt = true, png = true, jpg = true, jpeg = true, mp3 = true, wav = true, ogg = true
+}
+
+function CNSX.WritablePath( path )
+    path = string.lower( CNSX.SanitizePath( path ) )
+    local ext = string.lower( string.GetExtensionFromFilename( path ) or "" )
+    if CNSX.WriteExts[ext] then
+        return path
+    end
+
+    return path .. ".txt"
+end
+
+-- shared by the server write and the client's local/remote writes; returns ok, finalPath, err
+function CNSX.WriteData( path, body )
+    path = CNSX.WritablePath( path )
+    if path == "" or path == ".txt" then
+        return false, path, "bad path"
+    end
+    local folder = string.GetPathFromFilename( path )
+    if folder and folder ~= "" then
+        file.CreateDir( string.TrimRight( folder, "/" ) )
+    end
+    local res = file.Write( path, tostring( body or "" ) )
+    local ok = res
+    if not isbool( res ) then
+        ok = file.Read( path, "DATA" ) == tostring( body or "" )
+    end
+    if not ok then
+        return false, path, "write failed"
+    end
+
+    return true, path
+end
+
 function CNSX.RootName( key )
     key = string.lower( tostring( key or "data" ) )
     return CNSX.Roots[key] or "DATA"

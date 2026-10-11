@@ -114,6 +114,10 @@ var gmodCompleter = {
 try {
   ed.completers = [gmodCompleter];
 } catch (e) {}
+function cnsxHotkey(k){ if (window.cnsx && cnsx.hotkey) cnsx.hotkey(k); }
+ed.commands.addCommand({name:"cnsxFind", bindKey:{win:"Ctrl-F|Ctrl-H", mac:"Command-F|Command-H"}, exec:function(){ cnsxHotkey("find"); }});
+ed.commands.addCommand({name:"cnsxLine", bindKey:{win:"Ctrl-G", mac:"Command-G"}, exec:function(){ cnsxHotkey("line"); }});
+ed.commands.addCommand({name:"cnsxEsc", bindKey:{win:"Esc", mac:"Esc"}, exec:function(){ cnsxHotkey("esc"); }});
 ed.setValue("", -1);
 function cnsxSet(v){ ed.setValue(v || "", -1); }
 function cnsxSetObj(o){ ed.setValue((o && o.c) || "", -1); }

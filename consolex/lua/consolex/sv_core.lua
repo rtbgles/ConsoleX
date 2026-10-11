@@ -184,19 +184,6 @@ local function readFile( path, root )
     return body
 end
 
-local function writeData( path, body )
-    path = CNSX.SanitizePath( path )
-    if path == "" then
-        return false, "bad path"
-    end
-    local folder = string.GetPathFromFilename( path )
-    if folder and folder ~= "" then
-        file.CreateDir( string.TrimRight( folder, "/" ) )
-    end
-    file.Write( path, tostring( body or "" ) )
-    return file.Exists( path, "DATA" )
-end
-
 function CNSX.SaveTabs( ply, tabs )
     file.CreateDir( "consolex" )
     file.CreateDir( userDir( ply ) )
@@ -344,7 +331,9 @@ net.Receive( "CNSX_Cmd", function( _, ply )
     end
 
     if not CNSX.Authed( ply ) then
-        push( ply, "lock", { needSet = not CNSX.HasMaster(), err = "unlock required" } )
+        if act ~= "session" and act ~= "tabs" then
+            push( ply, "lock", { needSet = not CNSX.HasMaster(), err = "session expired, unlock again" } )
+        end
         return
     end
 
@@ -362,9 +351,9 @@ net.Receive( "CNSX_Cmd", function( _, ply )
     end
 
     if act == "write" then
-        auditLine( ply, "write DATA/" .. CNSX.SanitizePath( data.path ) )
-        local ok, err = writeData( data.path or "", data.body or "" )
-        push( ply, "saved", { path = data.path, ok = ok, err = err } )
+        local ok, path, err = CNSX.WriteData( data.path or "", data.body or "" )
+        auditLine( ply, "write DATA/" .. path .. ( ok and "" or ( " FAILED: " .. tostring( err ) ) ) )
+        push( ply, "saved", { path = path, ok = ok, err = err } )
         return
     end
 
