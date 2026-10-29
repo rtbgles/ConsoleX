@@ -72,7 +72,7 @@ var W = window;
 var PREFS = ]==] .. boot .. [==[;
 var MODES = {glua:1,"ace/mode/lua":1,"ace/mode/javascript":1,"ace/mode/html":1,"ace/mode/css":1,"ace/mode/json":1,"ace/mode/xml":1,"ace/mode/text":1,"ace/mode/markdown":1};
 
-function call(name, a, b){ try { if (W.cnsx && cnsx[name]) { cnsx[name](a === undefined ? "" : a, b === undefined ? "" : b); } } catch (e) {} }
+function call(name, a, b, c){ try { if (W.cnsx && cnsx[name]) { cnsx[name](a === undefined ? "" : a, b === undefined ? "" : b, c === undefined ? "" : c); } } catch (e) {} }
 // messages raised before Lua has registered the bridge wait for cnsxReady()
 var early = [];
 function info(msg){ if (W.cnsx && cnsx.info) call("info", String(msg)); else early.push(String(msg)); }
@@ -183,7 +183,7 @@ var gluaCompleter = {
 };
 
 var ed = null, fb = null, loading = false, changeTimer = null, cursorTimer = null;
-var sessions = {}, current = null, fbText = {}, gluaMode = null, wantMode = {};
+var sessions = {}, current = null, fbText = {}, gluaMode = null, wantMode = {}, readOnly = {};
 
 function notifyChange(){
   if (loading || changeTimer) return;
@@ -346,15 +346,17 @@ function fbLineStart(n){
 if (typeof ace === "undefined") setupFallback(); else setupAce();
 
 // ---- API used by Lua ----
-W.cnsxOpen = function(id, text, mode, force){
+W.cnsxOpen = function(id, text, mode, force, ro){
   id = String(id);
   wantMode[id] = mode;
+  readOnly[id] = !!ro;
   if (ed) {
     var s = sessions[id];
     loading = true;
     if (!s) { s = sessions[id] = makeSession(text, mode); }
     else { if (force) { s.setValue(text || ""); s.getUndoManager().reset(); } setSessionMode(s, mode); }
     ed.setSession(s);
+    ed.setReadOnly(!!ro);
     loading = false;
     current = id;
     ed.focus();
@@ -362,20 +364,22 @@ W.cnsxOpen = function(id, text, mode, force){
   } else if (fb) {
     if (current !== null) fbText[current] = fb.value;
     if (fbText[id] === undefined || force) fbText[id] = text || "";
-    loading = true; fb.value = fbText[id]; loading = false;
+    loading = true; fb.value = fbText[id]; fb.readOnly = !!ro; loading = false;
     current = id;
   }
 };
 W.cnsxDrop = function(id){
   id = String(id);
   if (sessions[id]) { try { sessions[id].destroy(); } catch (e) {} delete sessions[id]; }
-  delete fbText[id]; delete wantMode[id];
+  delete fbText[id]; delete wantMode[id]; delete readOnly[id];
 };
 W.cnsxDropAll = function(){ for (var id in sessions) W.cnsxDrop(id); fbText = {}; };
-W.cnsxCode = function(){
-  if (ed) call("code", ed.getValue(), ed.getSelectedText());
-  else if (fb) call("code", fb.value, fb.value.substring(fb.selectionStart, fb.selectionEnd));
-  else call("code", "", "");
+// seq is echoed so Lua can drop a reply that arrives after it gave up waiting
+W.cnsxCode = function(seq){
+  seq = parseInt(seq, 10) || 0;
+  if (ed) call("code", ed.getValue(), ed.getSelectedText(), seq);
+  else if (fb) call("code", fb.value, fb.value.substring(fb.selectionStart, fb.selectionEnd), seq);
+  else call("code", "", "", seq);
 };
 W.cnsxMode = function(mode){ if (ed && current !== null && sessions[current]) { wantMode[current] = mode; setSessionMode(sessions[current], mode); } };
 W.cnsxPrefs = function(p){ applyPrefs(p); };

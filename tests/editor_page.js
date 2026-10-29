@@ -17,7 +17,7 @@ function check(name, cond) {
 
 // stands in for DHTML:AddFunction("cnsx", ...): records every call
 const BRIDGE = `window.cnsx = {}; window.calls = [];
-["code","changed","cursor","hotkey","info"].forEach(function(n){ cnsx[n] = function(a, b){ calls.push([n, a, b]); }; });`;
+["code","changed","cursor","hotkey","info"].forEach(function(n){ cnsx[n] = function(a, b, c){ calls.push([n, a, b, c]); }; });`;
 
 async function load(browser, base) {
   const dir = fs.mkdtempSync(path.join(path.dirname(htmlPath), "page-"));
@@ -73,9 +73,14 @@ async function load(browser, base) {
   await page.waitForTimeout(400);
   check("typing reports a (throttled) change", await page.evaluate(() => calls.filter((c) => c[0] === "changed").length === 1));
 
-  await page.evaluate(() => { calls.length = 0; const ed = ace.edit("ed"); ed.selection.setRange(new (ace.require("ace/range").Range)(0, 0, 0, 11)); cnsxCode(); });
+  await page.evaluate(() => { calls.length = 0; const ed = ace.edit("ed"); ed.selection.setRange(new (ace.require("ace/range").Range)(0, 0, 0, 11)); cnsxCode(7); });
   const code = await page.evaluate(() => calls.find((c) => c[0] === "code"));
   check("cnsxCode returns the full text and the selection", code && code[1].startsWith("local x = 1 // note") && code[2] === "local x = 1");
+  check("cnsxCode echoes the request number", await page.evaluate(() => { calls.length = 0; cnsxCode(7); return calls[0][3] === 7; }));
+  check("read-only tabs are read-only in the editor", await page.evaluate(() => {
+    cnsxOpen("ro", "locked", "ace/mode/text", false, true); const a = ace.edit("ed").getReadOnly();
+    cnsxOpen("t1", "", "glua", false, false); return a && !ace.edit("ed").getReadOnly();
+  }));
 
   // autocomplete
   await page.evaluate(() => cnsxApi("cl", { globals: "print\nLocalPlayer", libs: "hook.Add\nhook.Remove\nnet.SendToServer", methods: "Player:Nick\nEntity:GetPos" }));

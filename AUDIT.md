@@ -8,9 +8,9 @@ This round started from the uploaded 1.5.2, which added an **autosave** feature 
 
 - **I read every file in full**, and compared the Derma/DHTML code with the base-game source (`dhtml.lua`, `dlistview.lua`, `dtextentry.lua`, `util.lua`).
 - **Compile and API checks:** every file compiles under LuaJIT, the Lua runtime GMod uses. A GMod API checker found no unknown functions, realm mistakes or unregistered network messages. I looked up every new API call against the wiki mirror.
-- **`tests/cnsx_e2e.lua` (103 checks).** This test loads the real server file and the real client files into simulated GMod environments: one server and three clients (two superadmins and one ordinary player). A fake network connects them, and the test clicks through the IDE. Run it with `luajit tests/cnsx_e2e.lua`.
-- **`tests/editor_page.js` (47 checks).** This test loads the real editor page in headless Chromium, using the same Ace 1.32.6 build the addon loads from cdnjs (taken from npm). It checks GLua highlighting, autocomplete, shortcuts, the Lua bridge, find/replace, prefs and the offline fallback. The steps to run it are at the top of the file.
-- **An independent review pass** read the finished code from scratch; its findings were fixed and re-tested.
+- **`tests/cnsx_e2e.lua` (112 checks).** This test loads the real server file and the real client files into simulated GMod environments: one server and three clients (two superadmins and one ordinary player). A fake network connects them, and the test clicks through the IDE. Run it with `luajit tests/cnsx_e2e.lua`.
+- **`tests/editor_page.js` (49 checks).** This test loads the real editor page in headless Chromium, using the same Ace 1.32.6 build the addon loads from cdnjs (taken from npm). It checks GLua highlighting, autocomplete, shortcuts, the Lua bridge, find/replace, prefs and the offline fallback. The steps to run it are at the top of the file.
+- **An independent review pass** read the finished code from scratch. Its findings are listed below and were fixed, with a regression check for each. Where I could, I confirmed a check fails when its fix is reverted.
 - **Not tested on a live server.** The harness simulates GMod. How things look on screen, and Chromium-in-GMod quirks, still need a real client.
 
 ## Bugs in the uploaded autosave
@@ -39,6 +39,24 @@ Autosave has been rebuilt. Every tab is kept as a **local draft** about 1.5 s af
 | 7 | Medium | **Inconsistent rule for receiving client code.** An `owner` or `root` group could open the IDE, but its client refused code pushed to it (the client checked only `IsSuperAdmin`). | One rule (`CNSX.Allowed`) is used everywhere: by the server's target checks, and by the client before running pushed code or serving its files. |
 | 8 | Medium | **The overhead banner drew in the skybox and depth passes**, and allocated colors every frame. It also kept retrying a missing material every frame. | It skips the depth and skybox passes and dormant players. Colors and the material are cached. |
 | 9 | Low | The `cnsx_session_min` convar was created on clients too, where it is meaningless. Closing the window saved the stored tab text, not the live editor text. The list silently stopped at 160 entries. | Fixed. The list now goes up to 1000 entries and says when it is cut off. |
+
+## Independent review findings (fixed)
+
+| # | Severity | Issue | Fix |
+|---|----------|-------|-----|
+| R1 | High | **A remote target could forge its reply.** The server forwarded whatever another superadmin's client sent back for a Player DATA request, and that is a client which never typed the master password. It could set `tabId` to re-point one of your tabs (for example a server file) at "remote", so your next Ctrl+S would send that file's text to them. It could also attach a `body` to a listing to open a tab of its choosing, or send malformed rows that threw errors in your client. | Each remote request has a server-side id. The server remembers the action, path and tab, and rebuilds the reply from only the fields that action allows, type-checked. The client only accepts a save result for a tab that is waiting on a save *to that player*. |
+| R2 | Medium | Remote requests had one slot per admin, with no id. A save reply could be dropped while a listing was pending, and two admins using the same target could receive each other's replies. | Covered by R1's request ids. |
+| R3 | Medium | Editor text was assigned to whichever tab was active *when the reply arrived*. Closing or switching tabs while a read was in flight could put one tab's text into another, and with autosave on, into another file. | Each read is bound to the tab that was showing when it was requested. The reply carries a sequence number, and stale replies are dropped. Tab selection goes by tab, not index. |
+| R4 | Medium | A partial server backup (large tabs left out) could replace newer local drafts after a map change, losing the large tabs. | Backups carry the draft's own timestamp and a `partial` flag. Partial backups never replace local drafts. |
+| R5 | Medium | A slow Player DATA listing could arrive after you had switched to Server DATA and repaint the list with the other player's files. Right-click Delete/Rename would then act on server paths with those names. | Listings carry a sequence number; only the newest one fills the list. |
+| R6 | Low | "New file here" overwrote an existing file with an empty one. | It refuses when the file exists, both locally and on the server. |
+| R7 | Low | Autosave on a `.cfg`/`.lua`/`.ini` file in DATA created `name.cfg.txt` and re-pointed the tab there. | Autosave skips files `file.Write` can't save under their own name. |
+| R8 | Low | Read-only (truncated) tabs could still be typed in. | The editor itself is read-only for those tabs. |
+| R9 | Low | A case-insensitive `re:` search lowercased the pattern, so `%S` became `%s`. | Pattern searches are always case-sensitive. |
+| R10 | Low | The idle-lock countdown used the time left at open, not the idle window, and ignored the 12 h cap. | The server sends the idle window and the hard cap; the client counts down from its last command. |
+| R11 | Low | A pending "close after save" stayed set if the save was never sent, so a later save closed the tab. | It is cleared on every path where the save doesn't go out. |
+
+**Not changed (your call):** the reviewer suggested adding subresource-integrity hashes to the two Ace `<script>` tags. Anything running in the editor page can ask Lua to run the editor text on the server, so a tampered cdnjs file would be dangerous. I couldn't fetch the cdnjs files from here to confirm their hashes. A wrong hash would block Ace for every admin, leaving only the plain editor. Adding it is a two-line change once the hashes are taken from cdnjs.
 
 ## Security review
 

@@ -391,12 +391,13 @@ function Panel:RunJavascript( js )
         if self._docs[a[1]] == nil or a[4] then self._docs[a[1]] = a[2] end
         self._cur = a[1]
         self._mode = a[3]
+        self._ro = a[5]
         self._sel = ""
     elseif fn == "cnsxDrop" then
         self._docs[a[1]] = nil
     elseif fn == "cnsxCode" then
         local f = self._fns and self._fns["cnsx.code"]
-        if f then self._pendingCode = function() f( self._docs[self._cur] or "", self._sel or "" ) end end
+        if f then local seq = a[1] self._pendingCode = function() f( self._docs[self._cur] or "", self._sel or "", seq ) end end
     elseif fn == "cnsxLint" then
         self._lint = a[1]
     elseif fn == "cnsxMark" then
@@ -825,6 +826,53 @@ button( CL, "Save" ).DoClick() pump()
 check( "remote save writes the target's file", CLB._files["notes/todo.txt"] == "buy oat milk" )
 check( "target is told about the write", ( CLB._chat or "" ):find( "Admin wrote your DATA/notes/todo.txt", 1, true ) ~= nil )
 rootBox:ChooseOption( "Server DATA", 1 ) pump()
+
+-- 16b. review regressions: forged/late remote replies, stale editor replies, list races
+local tabsBefore = #tabButtons( CL )
+local origNetWrite = CLB.CNSX.NetWrite
+CLB.CNSX.NetWrite = function( t ) t.body = "evil" t.tabId = "t1" t.ok = true t.rows = t.rows or { { name = 5 } } return origNetWrite( t ) end
+rootBox:ChooseOption( "Player DATA", 5 ) pump()
+CLB.CNSX.NetWrite = origNetWrite
+check( "a forged list reply can't open tabs or touch other tabs", #tabButtons( CL ) == tabsBefore and not logText( CL ):find( "evil", 1, true ) )
+for rid = 1, 40 do
+    CLB.net.Start( "CNSX_RemoteOut" ) CLB.net.WriteUInt( rid, 32 ) CLB.CNSX.NetWrite( { rows = { { name = "x", path = "x" } }, body = "evil2" } ) CLB.net.SendToServer()
+end
+pump()
+check( "unsolicited remote replies are dropped", not logText( CL ):find( "evil2", 1, true ) and lineFor( tree, "x" ) == nil )
+-- remote list then an immediate server list: the slower remote reply must not repaint the tree
+pathField._text = "notes"
+STEP = 0
+button( CL, "List" ).DoClick()
+rootBox:ChooseOption( "Server DATA", 1 )
+pump()
+STEP = 0.06
+check( "a late remote listing doesn't overwrite the newer server listing", lineFor( tree, "notes/todo.txt" ) == nil )
+ed:Type( "local fresh = 1" )
+button( CL, "Check" ).DoClick()          -- a pull is now in flight
+ed._fns["cnsx.code"]( "STALE TEXT", "", -5 ) -- an old reply turns up first
+pump()
+check( "a stale editor reply is ignored", lastLog( CL ):match( "[^\n]*\n$" ):find( "OK check compile ok", 1, true ) ~= nil )
+-- New file must not clobber an existing one
+SV._files["consolex/keep.txt"] = "precious"
+pathField._text = "consolex"
+button( CL, "List" ).DoClick() pump()
+tree.OnRowRightClick( tree, 1, lineFor( tree, "consolex/keep.txt" ) )
+table.insert( CL._prompts, "keep.txt" )
+CL._menus[#CL._menus]:Pick( "New file" ) pump()
+check( "New file refuses to overwrite an existing file", SV._files["consolex/keep.txt"] == "precious" and lastLog( CL ):find( "already exists", 1, true ) )
+-- autosave never renames a .cfg to .cfg.txt
+SV._files["consolex/game.cfg"] = "a 1"
+button( CL, "List" ).DoClick() pump()
+tree.OnRowSelected( tree, 1, lineFor( tree, "consolex/game.cfg" ) ) pump()
+CL.CNSX.Prefs.autosave = true
+ed:Type( "a 2" )
+wait( 3 )
+CL.CNSX.Prefs.autosave = false
+check( "autosave skips files it can't write under their own name", SV._files["consolex/game.cfg.txt"] == nil )
+check( "read-only flag reaches the editor", ed._ro == false )
+local job = CL.CNSX.GrepNew( { query = "%S+x", pattern = true }, "DATA" )
+check( "pattern searches stay case-sensitive (no %S -> %s)", job.case == true and job.query == "%S+x" )
+check( "idle countdown uses the server's idle window", CL.CNSX._idle == 45 * 60 and ( CL.CNSX._hardAt or 0 ) > now )
 
 -- 17. error feed
 SV._hooks["OnLuaError/CNSX_ErrorFeed"]( "lua/autorun/x.lua:5: attempt to index nil", "server" )

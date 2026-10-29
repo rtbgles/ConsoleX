@@ -577,7 +577,8 @@ function CNSX.GrepNew( data, root )
         root = root,
         path = CNSX.SanitizePath( data.path ),
         query = query,
-        case = data.case == true,
+        -- lowercasing a Lua pattern would flip classes (%S -> %s), so patterns are always case-sensitive
+        case = data.case == true or data.pattern == true,
         pattern = data.pattern == true,
         started = SysTime()
     }

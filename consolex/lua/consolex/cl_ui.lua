@@ -179,6 +179,16 @@ local function send( act, extra )
     return true
 end
 
+-- the server's idle window and hard cap; the countdown runs from our last command
+local function setSession( info )
+    if not istable( info ) then
+        return
+    end
+    CNSX._idle = tonumber( info.idle ) or 0
+    CNSX._hardAt = RealTime() + ( tonumber( info.hard ) or 0 )
+    lastActivity = RealTime()
+end
+
 local function setBusy( open )
     send( "session", {
         open = open and true or false,
@@ -207,13 +217,25 @@ local function jsBool( b )
 end
 
 -- every caller wants the live editor text; one JS round trip answers all queued callers
+-- the text belongs to the tab that was showing when it was requested; a reply for an older request
+-- (after the timeout fallback already answered) is dropped
 local pullQueue = {}
 local pullSeq = 0
+local pullTab
 
-local function flushPull( all, sel )
+local function flushPull( all, sel, seq )
+    if seq ~= nil and seq ~= pullSeq then
+        return
+    end
+    if #pullQueue == 0 then
+        return
+    end
     local queue = pullQueue
+    local tab = pullTab
     pullQueue = {}
-    local tab = current()
+    pullTab = nil
+    -- invalidate this request so a late reply can't land anywhere
+    pullSeq = pullSeq + 1
     if tab and all ~= nil and not tab.readOnly then
         tab.body = all
         tab.dirty = tab.body ~= tab.saved
@@ -234,11 +256,12 @@ local function pullBody( cb )
         return
     end
     pullSeq = pullSeq + 1
+    pullTab = current()
     local seq = pullSeq
-    editor:RunJavascript( "if(window.cnsxCode)cnsxCode();" )
+    editor:RunJavascript( "if(window.cnsxCode)cnsxCode(" .. seq .. ");" )
     timer.Simple( 0.5, function()
-        if seq == pullSeq and #pullQueue > 0 then
-            flushPull( nil, nil )
+        if seq == pullSeq then
+            flushPull( nil, nil, seq )
         end
     end )
 end
@@ -263,7 +286,7 @@ local function showTab( tab, force )
     if editorReady() then
         local known = editor._sessions[tab.id]
         local body = ( force or not known ) and ( tab.body or "" ) or ""
-        editor:RunJavascript( "if(window.cnsxOpen)cnsxOpen(" .. jsQuote( tab.id ) .. "," .. jsQuote( body ) .. "," .. jsQuote( CNSX.AceMode( tab.mode ) ) .. "," .. jsBool( force and known ) .. ");" )
+        editor:RunJavascript( "if(window.cnsxOpen)cnsxOpen(" .. jsQuote( tab.id ) .. "," .. jsQuote( body ) .. "," .. jsQuote( CNSX.AceMode( tab.mode ) ) .. "," .. jsBool( force and known ) .. "," .. jsBool( tab.readOnly ) .. ");" )
         editor._sessions[tab.id] = true
     end
     if IsValid( pathEntry ) and tab.path ~= "" and tab.root ~= "remote" then
@@ -356,9 +379,12 @@ local function tabsBlob()
 end
 
 -- drafts: every tab is kept in DATA/consolex/session.json on this PC, and backed up to the server now and then
+local draftT = 0
+
 local function saveDraft()
+    draftT = os.time()
     file.CreateDir( "consolex" )
-    file.Write( "consolex/session.json", CNSX.Encode( { tabs = tabsBlob(), active = active, t = os.time() } ) )
+    file.Write( "consolex/session.json", CNSX.Encode( { tabs = tabsBlob(), active = active, t = draftT } ) )
     serverDirty = true
 end
 
@@ -369,7 +395,7 @@ local function syncServer( force )
         return
     end
     serverDirty = false
-    if send( "tabs", { tabs = tabsBlob(), ct = os.time() } ) then
+    if send( "tabs", { tabs = tabsBlob(), ct = draftT } ) then
         return
     end
     -- too big for one message: back up the tabs that fit, the rest stay in the local drafts only
@@ -379,7 +405,7 @@ local function syncServer( force )
             small[#small + 1] = row
         end
     end
-    local ok = send( "tabs", { tabs = small, ct = os.time() } )
+    local ok = send( "tabs", { tabs = small, ct = draftT, partial = true } )
     if not CNSX._warnedTabs then
         CNSX._warnedTabs = true
         logLine( ok and "large tabs are not backed up to the server; they are still saved on this PC" or "tabs are too large for the server backup; they are still saved on this PC", true )
@@ -394,12 +420,18 @@ local function loadLocalSession()
 end
 
 local function selectTab( i )
-    if not tabs[i] then
+    local target = tabs[i]
+    if not target then
         return
     end
     pullBody( function()
-        active = i
-        showTab( tabs[i] )
+        -- the list may have changed while the editor text was on its way
+        local idx = indexOfTab( target )
+        if not idx then
+            return
+        end
+        active = idx
+        showTab( target )
         saveDraft()
         repaintTabs()
     end )
@@ -530,10 +562,16 @@ saveTab = function( tab, opts )
     end
     local body = tab.body or ""
     if root == "mine" then
+        if opts.create and file.Exists( CNSX.WritablePath( path ), "DATA" ) then
+            logLine( "my DATA/" .. CNSX.WritablePath( path ) .. " already exists", true )
+            return
+        end
         local ok, final, err = CNSX.WriteData( path, body )
         logLine( ok and ( ( opts.auto and "autosaved" or "saved" ) .. " my DATA/" .. final ) or ( "local save failed: " .. tostring( err ) ), not ok )
         if ok then
             markSaved( tab, final, "mine", body )
+        else
+            tab.closeAfterSave = nil
         end
         return
     end
@@ -541,17 +579,27 @@ saveTab = function( tab, opts )
         local sid = opts.sid or tab.sid or comboData( playerBox )
         if not sid then
             logLine( "pick a player first", true )
+            tab.closeAfterSave = nil
             return
         end
-        tab.sid = sid
+        tab.pendingSid = sid
         tab.pendingBody = body
-        send( "remote_write", { sid = sid, path = path, body = body, tabId = tab.id } )
-        logLine( "saving to player DATA/" .. CNSX.WritablePath( path ) )
+        if send( "remote_write", { sid = sid, path = path, body = body, tabId = tab.id } ) then
+            logLine( "saving to player DATA/" .. CNSX.WritablePath( path ) )
+        else
+            tab.pendingBody = nil
+            tab.closeAfterSave = nil
+        end
         return
     end
     tab.pendingBody = body
-    if send( "write", { path = path, body = body, tabId = tab.id, auto = opts.auto or nil } ) and not opts.auto then
-        logLine( "saving server DATA/" .. CNSX.WritablePath( path ) )
+    if send( "write", { path = path, body = body, tabId = tab.id, auto = opts.auto or nil, create = opts.create or nil } ) then
+        if not opts.auto then
+            logLine( "saving server DATA/" .. CNSX.WritablePath( path ) )
+        end
+    else
+        tab.pendingBody = nil
+        tab.closeAfterSave = nil
     end
 end
 
@@ -728,6 +776,10 @@ local function autosaveFile()
     end
     -- only the tab's own writable file; GAME/LUA/remote are never written behind your back
     if tab.root ~= "data" and tab.root ~= "mine" then
+        return
+    end
+    -- a type file.Write refuses would be saved as name.ext.txt; never do that unasked
+    if CNSX.WritablePath( tab.path ) ~= string.lower( tab.path ) then
         return
     end
     saveTab( tab, { auto = true } )
@@ -1064,6 +1116,9 @@ local function fillGrep( res )
     logLine( "find \"" .. tostring( res.query ) .. "\": " .. #( res.hits or {} ) .. " hits in " .. tostring( res.scanned ) .. " files (" .. tostring( res.secs ) .. "s)" .. ( res.capped and ", capped" or "" ) )
 end
 
+-- only the newest listing may fill the tree (remote replies are slow and can arrive after a newer one)
+local listSeq = 0
+
 local function listLocal( path )
     local rows, truncated = CNSX.ListDir( path, "DATA" )
     fillTree( rows, CNSX.SanitizePath( path ), truncated )
@@ -1230,7 +1285,7 @@ local function fileMenu( line )
                 local full = folder == "" and name or ( folder .. "/" .. name )
                 local tab = addTab( string.GetFileFromFilename( full ), "", "", root, CNSX.GuessMode( full ) )
                 if tab then
-                    saveTab( tab, { path = full, root = root } )
+                    saveTab( tab, { path = full, root = root, create = true } )
                 end
             end, nil, "Create", "Cancel" )
         end )
@@ -1714,6 +1769,7 @@ local function buildWindow()
             path = string.TrimRight( string.GetPathFromFilename( path ) or "", "/" )
         end
         setStatus( "listing " .. ( ROOT_LABEL[root] or root ) )
+        listSeq = listSeq + 1
         if root == "mine" then
             listLocal( path )
             return
@@ -1725,10 +1781,10 @@ local function buildWindow()
                 send( "players" )
                 return
             end
-            send( "remote_list", { sid = sid, path = path } )
+            send( "remote_list", { sid = sid, path = path, seq = listSeq } )
             return
         end
-        send( "list", { root = root, path = path } )
+        send( "list", { root = root, path = path, seq = listSeq } )
     end )
     navBtn( "Save", "Save the current tab to its own file (Ctrl+S). Unsaved or GAME/LUA tabs ask for a DATA path.", function()
         saveCurrent( false )
@@ -1800,8 +1856,8 @@ local function buildWindow()
     editor._sessions = {}
     -- AddFunction only works once the page has loaded (DHTML:AddFunction wiki note), so the whole bridge lives here
     editor.OnDocumentReady = function( self )
-        self:AddFunction( "cnsx", "code", function( all, sel )
-            flushPull( tostring( all or "" ), tostring( sel or "" ) )
+        self:AddFunction( "cnsx", "code", function( all, sel, seq )
+            flushPull( tostring( all or "" ), tostring( sel or "" ), tonumber( seq ) or -1 )
         end )
         self:AddFunction( "cnsx", "changed", function()
             onEditorChanged()
@@ -1928,12 +1984,12 @@ local function buildWindow()
             return
         end
         self._next = RealTime() + 1
-        local ttl = tonumber( CNSX._ttl ) or 0
-        if ttl <= 0 then
+        local idle = tonumber( CNSX._idle ) or 0
+        if idle <= 0 then
             self:SetText( "" )
             return
         end
-        local left = math.max( 0, ttl - ( RealTime() - lastActivity ) )
+        local left = math.max( 0, math.min( idle - ( RealTime() - lastActivity ), ( CNSX._hardAt or 0 ) - RealTime() ) )
         self:SetText( string.format( "idle lock in %d:%02d", math.floor( left / 60 ), math.floor( left % 60 ) ) )
         self:SetTextColor( left < 120 and CNSX.Theme.err or CNSX.Theme.muted )
         if serverDirty and RealTime() - ( CNSX._lastSync or 0 ) > SERVER_SYNC_SECS then
@@ -2042,13 +2098,15 @@ local function buildWindow()
 end
 
 -- local drafts win unless the server copy is newer (e.g. edited from another PC)
-local function restoreTabs( serverTabs, serverT )
+local function restoreTabs( serverTabs, serverT, partial )
     if #tabs > 0 then
         return
     end
     local localTabs, localActive, localT = loadLocalSession()
     local source, pick = localTabs, localActive
-    if istable( serverTabs ) and #serverTabs > 0 and ( not localTabs or ( tonumber( serverT ) or 0 ) > ( localT or 0 ) + 5 ) then
+    -- a partial backup (large tabs left out) never replaces local drafts
+    local newer = not partial and ( tonumber( serverT ) or 0 ) > ( localT or 0 )
+    if istable( serverTabs ) and #serverTabs > 0 and ( not localTabs or newer ) then
         source, pick = serverTabs, 1
     end
     for _, row in ipairs( source or {} ) do
@@ -2067,9 +2125,9 @@ net.Receive( "CNSX_Open", function()
         CNSX._lock:Close()
     end
     local data = CNSX.NetRead()
-    CNSX._ttl = tonumber( data.ttl ) or CNSX._ttl
+    setSession( data.session )
     buildWindow()
-    restoreTabs( data.tabs, data.t )
+    restoreTabs( data.tabs, data.t, data.partial )
     showTab( current() )
     repaintTabs()
     if data.err then
@@ -2082,6 +2140,9 @@ local OUT = {}
 OUT.list = function( data )
     if data.err then
         logLine( "list failed: " .. tostring( data.err ), true )
+        return
+    end
+    if tonumber( data.seq ) ~= listSeq then
         return
     end
     fillTree( data.rows, data.path, data.truncated )
@@ -2112,9 +2173,7 @@ OUT.lock = function( data )
         return
     end
     if data.unlocked or data.deny then
-        if data.ttl then
-            CNSX._ttl = tonumber( data.ttl )
-        end
+        setSession( data.session )
         if IsValid( CNSX._lock ) then
             CNSX._lock:Close()
         end
@@ -2126,15 +2185,16 @@ end
 OUT.saved = function( data )
     local tab = tabById( data.tabId )
     if not data.ok then
-        logLine( "save failed: " .. tostring( data.err ), true )
+        logLine( "save failed: " .. tostring( data.path or "" ) .. " " .. tostring( data.err ), true )
         if tab then
             tab.closeAfterSave = nil
+            tab.pendingBody = nil
         end
         return
     end
     logLine( ( data.auto and "autosaved " or "wrote " ) .. "server DATA/" .. tostring( data.path ) )
-    if tab then
-        markSaved( tab, data.path, "data", tab.pendingBody or tab.body )
+    if tab and tab.pendingBody then
+        markSaved( tab, data.path, "data", tab.pendingBody )
         tab.pendingBody = nil
     end
 end
@@ -2218,33 +2278,50 @@ end
 
 OUT.tabs = function( data )
     if istable( data.tabs ) and #data.tabs > 0 and #tabs == 0 then
-        restoreTabs( data.tabs, data.t )
+        restoreTabs( data.tabs, data.t, data.partial )
         showTab( current() )
         repaintTabs()
     end
 end
 
 OUT.remote = function( data )
-    if data.err and not data.rows and not data.body and data.ok == nil then
+    if data.err and not data.rows and not data.body and not data.write then
         logLine( "player DATA: " .. tostring( data.err ), true )
         return
     end
-    if data.rows then
-        fillTree( data.rows, CNSX.SanitizePath( data.path ), data.truncated )
-        logLine( "listed " .. tostring( data.from ) .. "'s DATA/" .. CNSX.SanitizePath( data.path ) )
+    local from = tostring( data.from or "player" )
+    local path = CNSX.SanitizePath( data.path )
+    if istable( data.rows ) then
+        if tonumber( data.seq ) == listSeq then
+            fillTree( data.rows, path, data.truncated )
+            logLine( "listed " .. from .. "'s DATA/" .. path )
+        end
+        return
     end
-    if data.body then
-        addTab( tostring( data.from or "ply" ) .. ":" .. string.GetFileFromFilename( data.path or "file" ), data.body, CNSX.SanitizePath( data.path ), "remote", CNSX.GuessMode( data.path ), { sid = data.sid, readOnly = data.readOnly == true } )
-        logLine( "opened " .. tostring( data.from ) .. "'s DATA/" .. tostring( data.path ) .. ( data.err and ( " (" .. data.err .. ")" ) or "" ) )
+    if isstring( data.body ) then
+        addTab( from .. ":" .. string.GetFileFromFilename( path ), data.body, path, "remote", CNSX.GuessMode( path ), { sid = data.sid, readOnly = data.readOnly == true } )
+        logLine( "opened " .. from .. "'s DATA/" .. path .. ( data.err and ( " (" .. tostring( data.err ) .. ")" ) or "" ) )
+        return
     end
-    if data.ok ~= nil then
-        logLine( data.ok and ( "wrote " .. tostring( data.from ) .. "'s DATA/" .. tostring( data.path ) ) or ( "remote save failed: " .. tostring( data.err ) ), not data.ok )
+    if data.write then
+        logLine( data.ok and ( "wrote " .. from .. "'s DATA/" .. path ) or ( "remote save failed: " .. tostring( data.err ) ), not data.ok )
+        -- only a tab that is waiting on a save to this very player
         local tab = tabById( data.tabId )
-        if tab and data.ok then
-            markSaved( tab, data.path, "remote", tab.pendingBody or tab.body )
+        if not tab or not tab.pendingBody or tab.pendingSid ~= data.sid then
+            return
+        end
+        if data.ok then
+            local body = tab.pendingBody
             tab.pendingBody = nil
-            tab.title = tostring( data.from or "ply" ) .. ":" .. tab.title
-            repaintTabs()
+            tab.sid = data.sid
+            markSaved( tab, path, "remote", body )
+            if indexOfTab( tab ) then
+                tab.title = from .. ":" .. tab.title
+                repaintTabs()
+            end
+        else
+            tab.pendingBody = nil
+            tab.closeAfterSave = nil
         end
     end
 end
@@ -2291,8 +2368,9 @@ net.Receive( "CNSX_Remote", function()
         return
     end
     local data = CNSX.NetRead()
+    local rid = tonumber( data.rid ) or 0
     local path = CNSX.SanitizePath( data.path )
-    local out = { path = path, tabId = data.tabId }
+    local out = { path = path }
     local verb
     if data.act == "remote_list" then
         out.rows, out.truncated = CNSX.ListDir( path, "DATA" )
@@ -2318,6 +2396,7 @@ net.Receive( "CNSX_Remote", function()
     -- tell this player what an admin just did to their files
     chat.AddText( Color( 90, 160, 255 ), "[CNSX] ", Color( 230, 230, 230 ), tostring( data.adminNick or "an admin" ) .. " " .. verb .. " your DATA/" .. ( out.path or path ) )
     net.Start( "CNSX_RemoteOut" )
+        net.WriteUInt( rid, 32 )
         CNSX.NetWrite( out )
     net.SendToServer()
 end )

@@ -129,13 +129,14 @@ function CNSX.GrantAuth( ply )
     CNSX.Auth[plyKey( ply )] = { expires = now + idleSeconds(), hardExpires = now + SESSION_MAX }
 end
 
-local function sessionTTL( ply )
+-- idle window plus time left before the hard cap; the client counts down from its last command
+local function sessionInfo( ply )
     local row = CNSX.Auth[plyKey( ply )]
     if not row then
-        return 0
+        return { idle = 0, hard = 0 }
     end
 
-    return math.max( 0, math.floor( math.min( row.expires, row.hardExpires ) - CurTime() ) )
+    return { idle = idleSeconds(), hard = math.max( 0, math.floor( row.hardExpires - CurTime() ) ) }
 end
 
 local function sid( ply )
@@ -183,28 +184,31 @@ local function canRunClient( ply )
 end
 
 -- ct is the client's own clock at save time, so the client compares it with its local drafts without clock skew
-function CNSX.SaveTabs( ply, tabs, ct )
+-- ct is the client's own clock when its drafts were last saved, so the client can compare it with
+-- its local drafts without clock skew; partial means large tabs were left out of this backup
+function CNSX.SaveTabs( ply, tabs, ct, partial )
     file.CreateDir( "consolex" )
     file.CreateDir( userDir( ply ) )
-    file.Write( userDir( ply ) .. "/tabs.json", CNSX.Encode( { tabs = istable( tabs ) and tabs or {}, t = os.time(), ct = tonumber( ct ) } ) )
+    file.Write( userDir( ply ) .. "/tabs.json", CNSX.Encode( { tabs = istable( tabs ) and tabs or {}, t = os.time(), ct = tonumber( ct ), partial = partial == true } ) )
 end
 
 function CNSX.LoadTabs( ply )
     local raw = file.Read( userDir( ply ) .. "/tabs.json", "DATA" )
     local data = CNSX.Decode( raw )
 
-    return istable( data.tabs ) and data.tabs or {}, tonumber( data.ct ) or 0
+    return istable( data.tabs ) and data.tabs or {}, tonumber( data.ct ) or 0, data.partial == true
 end
 
 local function openIDE( ply )
-    local tabs, t = CNSX.LoadTabs( ply )
-    local ttl = sessionTTL( ply )
+    local tabs, t, partial = CNSX.LoadTabs( ply )
+    local info = sessionInfo( ply )
     -- saved tabs that no longer fit in one message must not stop the IDE from opening
-    local packed = CNSX.Pack( { tabs = tabs, t = t, ttl = ttl } ) or CNSX.Pack( { tabs = {}, ttl = ttl, err = "saved server tabs were too large to send" } )
+    local packed = CNSX.Pack( { tabs = tabs, t = t, partial = partial, session = info } )
+        or CNSX.Pack( { tabs = {}, session = info, err = "saved server tabs were too large to send" } )
     net.Start( "CNSX_Open" )
         CNSX.NetWritePacked( packed )
     net.Send( ply )
-    push( ply, "lock", { unlocked = true, ttl = ttl } )
+    push( ply, "lock", { unlocked = true, session = info } )
 end
 
 local function chunkName( ply )
@@ -425,7 +429,7 @@ local ACTS = {}
 
 ACTS.list = function( ply, data )
     local rows, truncated = CNSX.ListDir( data.path or "", CNSX.RootName( data.root ) )
-    push( ply, "list", { root = data.root or "data", path = CNSX.SanitizePath( data.path ), rows = rows, truncated = truncated } )
+    push( ply, "list", { root = data.root or "data", path = CNSX.SanitizePath( data.path ), rows = rows, truncated = truncated, seq = tonumber( data.seq ) } )
 end
 
 ACTS.read = function( ply, data )
@@ -434,6 +438,10 @@ ACTS.read = function( ply, data )
 end
 
 ACTS.write = function( ply, data )
+    if data.create and file.Exists( CNSX.WritablePath( data.path ), "DATA" ) then
+        push( ply, "saved", { path = CNSX.WritablePath( data.path ), ok = false, err = "already exists", tabId = data.tabId } )
+        return
+    end
     local ok, path, err = CNSX.WriteData( data.path or "", data.body or "" )
     auditLine( ply, "write DATA/" .. path .. ( ok and "" or ( " FAILED: " .. tostring( err ) ) ) .. ( data.auto and " (autosave)" or "" ) )
     push( ply, "saved", { path = path, ok = ok, err = err, tabId = data.tabId, auto = data.auto } )
@@ -574,6 +582,18 @@ ACTS.logout = function( ply )
     push( ply, "lock", { locked = true } )
 end
 
+local REMOTE_TIMEOUT = 20
+local remoteSeq = 0
+
+local function pruneRemote()
+    local now = CurTime()
+    for id, pend in pairs( CNSX.PendingRemote ) do
+        if now - pend.t > REMOTE_TIMEOUT then
+            CNSX.PendingRemote[id] = nil
+        end
+    end
+end
+
 local function remoteAct( ply, data, act )
     local target = player.GetBySteamID64( tostring( data.sid or "" ) )
     if not IsValid( target ) then
@@ -585,20 +605,32 @@ local function remoteAct( ply, data, act )
         push( ply, "remote", { err = target:Nick() .. " is not a superadmin" } )
         return
     end
-    auditLine( ply, act .. " -> " .. target:Nick() .. " <" .. sid( target ) .. "> DATA/" .. CNSX.SanitizePath( data.path ) )
+    local path = CNSX.SanitizePath( data.path )
+    auditLine( ply, act .. " -> " .. target:Nick() .. " <" .. sid( target ) .. "> DATA/" .. path )
+    pruneRemote()
+    remoteSeq = remoteSeq + 1
+    local rid = remoteSeq
     local packed, err = CNSX.Pack( {
         act = act,
-        path = data.path or "",
-        admin = sid( ply ),
+        rid = rid,
+        path = path,
         adminNick = ply:Nick(),
-        body = data.body,
-        tabId = data.tabId
+        body = act == "remote_write" and tostring( data.body or "" ) or nil
     } )
     if not packed then
         push( ply, "remote", { err = tostring( err ) } )
         return
     end
-    CNSX.PendingRemote[sid( ply )] = { sid = sid( target ), t = CurTime() }
+    -- everything the reply is about is remembered here; the target only supplies the result
+    CNSX.PendingRemote[rid] = {
+        admin = sid( ply ),
+        target = sid( target ),
+        act = act,
+        path = path,
+        tabId = data.tabId,
+        seq = tonumber( data.seq ),
+        t = CurTime()
+    }
     net.Start( "CNSX_Remote" )
         CNSX.NetWritePacked( packed )
     net.Send( target )
@@ -656,7 +688,7 @@ net.Receive( "CNSX_Cmd", function( _, ply )
     end
 
     if act == "tabs" then
-        CNSX.SaveTabs( ply, data.tabs, data.ct )
+        CNSX.SaveTabs( ply, data.tabs, data.ct, data.partial )
         return
     end
 
@@ -672,33 +704,64 @@ net.Receive( "CNSX_Cmd", function( _, ply )
     end
 end )
 
-local REMOTE_TIMEOUT = 20
+-- rebuild the reply from what the request allows, so a target can't steer the admin's tabs or tree
+local REMOTE_ROWS = 1000
+
+local function cleanRows( rows )
+    local out = {}
+    if not istable( rows ) then
+        return out
+    end
+    for _, row in ipairs( rows ) do
+        if #out >= REMOTE_ROWS then
+            break
+        end
+        if istable( row ) and isstring( row.name ) and isstring( row.path ) then
+            out[#out + 1] = { name = row.name, path = CNSX.SanitizePath( row.path ), dir = row.dir == true, size = tonumber( row.size ) }
+        end
+    end
+
+    return out
+end
 
 net.Receive( "CNSX_RemoteOut", function( _, ply )
     if not IsValid( ply ) then
         return
     end
     -- find the request this player is answering before decoding anything they sent
-    local plySid = sid( ply )
-    local adminSid
-    for aSid, pend in pairs( CNSX.PendingRemote ) do
-        if pend.sid == plySid and CurTime() - pend.t <= REMOTE_TIMEOUT then
-            adminSid = aSid
-            break
-        end
-    end
-    if not adminSid then
+    local rid = net.ReadUInt( 32 )
+    local pend = CNSX.PendingRemote[rid]
+    if not pend or pend.target ~= sid( ply ) or CurTime() - pend.t > REMOTE_TIMEOUT then
         return
     end
-    CNSX.PendingRemote[adminSid] = nil
-    local admin = player.GetBySteamID64( adminSid )
+    CNSX.PendingRemote[rid] = nil
+    local admin = player.GetBySteamID64( pend.admin )
     if not IsValid( admin ) or not CNSX.Allowed( admin ) or not CNSX.Authed( admin ) then
         return
     end
     local data = CNSX.NetRead()
-    data.from = ply:Nick()
-    data.sid = plySid
-    push( admin, "remote", data )
+    local out = { from = ply:Nick(), sid = sid( ply ), path = pend.path }
+    if pend.act == "remote_list" then
+        out.rows = cleanRows( data.rows )
+        out.truncated = data.truncated == true
+        out.seq = pend.seq
+    elseif pend.act == "remote_read" then
+        if isstring( data.body ) and #data.body <= CNSX.MaxCode then
+            out.body = data.body
+            out.readOnly = data.readOnly == true
+        else
+            out.err = isstring( data.err ) and string.sub( data.err, 1, 200 ) or "unreadable"
+        end
+    else
+        out.ok = data.ok == true
+        out.path = CNSX.WritablePath( pend.path )
+        out.tabId = pend.tabId
+        out.write = true
+    end
+    if isstring( data.err ) and not out.err then
+        out.err = string.sub( data.err, 1, 200 )
+    end
+    push( admin, "remote", out )
 end )
 
 net.Receive( "CNSX_ClOut", function( _, ply )
@@ -780,7 +843,6 @@ hook.Add( "PlayerDisconnected", "CNSX_BusyClear", function( ply )
     end
     ply:SetNWBool( "CNSX_Active", false )
     CNSX.Auth[plyKey( ply )] = nil
-    CNSX.PendingRemote[sid( ply )] = nil
     CNSX.GrepJobs[sid( ply )] = nil
 end )
 
