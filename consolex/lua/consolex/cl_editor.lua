@@ -119,6 +119,9 @@ ed.commands.addCommand({name:"cnsxFind", bindKey:{win:"Ctrl-F|Ctrl-H", mac:"Comm
 ed.commands.addCommand({name:"cnsxLine", bindKey:{win:"Ctrl-G", mac:"Command-G"}, exec:function(){ cnsxHotkey("line"); }});
 ed.commands.addCommand({name:"cnsxEsc", bindKey:{win:"Esc", mac:"Esc"}, exec:function(){ cnsxHotkey("esc"); }});
 ed.setValue("", -1);
+ed.session.on("change", function() {
+  if (window.cnsx && cnsx.onChange) cnsx.onChange();
+});
 function cnsxSet(v){ ed.setValue(v || "", -1); }
 function cnsxSetObj(o){ ed.setValue((o && o.c) || "", -1); }
 function cnsxGet(){ return ed.getValue(); }

@@ -184,6 +184,63 @@ local function pullBody( cb )
     end )
 end
 
+
+local lastAutosave = 0
+local autosavePending = false
+local lastSavedBody = {}
+
+local function doAutosave()
+    if not editorReady() then return end
+    local tab = current()
+    if not tab or not tab.path or tab.path == "" then return end
+
+    pullBody( function( code )
+        if not code then return end
+        local key = ( tab.root or "data" ) .. "|" .. tab.path
+        if lastSavedBody[key] == code then return end
+
+        local root = comboData( rootBox ) or "data"
+        local path = tab.path
+
+        if root == "mine" then
+            local ok, final, err = CNSX.WriteData( path, code )
+            if ok then
+                lastSavedBody[key] = code
+                logLine( "autosaved local DATA/" .. final )
+            end
+        elseif root == "remote" then
+            -- skip remote autosave for safety
+            return
+        else
+            send( "write", { path = path, body = code } )
+            lastSavedBody[key] = code
+            logLine( "autosaved server DATA/" .. CNSX.WritablePath( path ) )
+        end
+        tab.body = code
+        persist()
+    end )
+end
+
+local function scheduleAutosave()
+    if autosavePending then return end
+    local now = CurTime()
+    if now - lastAutosave < 1.5 then
+        timer.Create( "CNSX_AutosaveDebounce", 1.5 - ( now - lastAutosave ), 1, function()
+            autosavePending = false
+            lastAutosave = CurTime()
+            doAutosave()
+        end )
+        autosavePending = true
+        return
+    end
+    autosavePending = true
+    timer.Simple( 0.4, function()
+        autosavePending = false
+        lastAutosave = CurTime()
+        doAutosave()
+    end )
+end
+
 local function selectTab( i )
     pullBody( function( code )
         if tabs[active] then
@@ -1307,3 +1364,12 @@ hook.Add( "OnPlayerChat", "CNSX_ChatOpen", function( ply, text )
 end )
 
 loadPrefs()
+
+
+hook.Add( "Think", "CNSX_AutosaveHook", function()
+    if not IsValid( editor ) or editor._autosaveHooked then return end
+    editor._autosaveHooked = true
+    editor:AddFunction( "cnsx", "onChange", function()
+        scheduleAutosave()
+    end )
+end )
