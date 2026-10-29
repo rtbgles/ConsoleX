@@ -16,6 +16,44 @@ CNSX.Modes = {
 
 CNSX.Themes = { "twilight", "monokai", "tomorrow_night", "dracula", "one_dark", "github_dark", "nord_dark", "gruvbox" }
 
+-- Ace 1.32.6 from cdnjs, pinned with subresource integrity (SHA-384 of the ace-builds 1.32.6 src-min-noconflict
+-- files, which cdnjs serves). Anything in the page can ask Lua to run the editor text on the server, so every
+-- script is hash-checked: a tampered file is refused by the browser and the plain fallback editor is used.
+-- Every mode and theme the IDE uses is preloaded here; loading any other module is blocked in the page.
+local ACE_BASE = "https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/"
+local ACE_FILES = {
+    { "ext-language_tools.js", "sha384-SCzD46ApOjZd1dwZm4K34RkprzqinG7pE+RordKq1S6jT4VFM+rrtbMoDOnSjblx" },
+    { "mode-lua.js", "sha384-aQ0xEbV8AwJQ0wjqb7rc1bO+KTDhP05VXoHocS9xvr6RLxJ8hliz1WKSqAX04mW1" },
+    { "mode-html.js", "sha384-rwYhnhOyGbvbmrLB5eKMK+iS0d/fDQn9Iyqldg3zvzu+wg3j62f8JHEUiDrroP5T" },
+    { "mode-xml.js", "sha384-AilwDWzxfF2ORpr33ReDMJ2V6xOlmyMLgP/szaEI3o6CuFo8h2o8qWPn4/h0Ucww" },
+    { "mode-json.js", "sha384-3HL3YZxzOVZZpgplS97aietQRGn0wStQ/vGP0ALupqcVI2CUN+6KH8HJwnx6aggA" },
+    { "mode-markdown.js", "sha384-zddY+oC+wPdlckyk+jBQreMQcdf8HvMJ7DgfJ4pGBQGwHFmHPZ1MC1GHwN1EN2ek" },
+    { "theme-twilight.js", "sha384-HBfZsrsw71vRkLsWe1rEE/zLgqgbwS9tY5TMj+hpM8Ie+tTihRm5UkOn2YyYzjDu" },
+    { "theme-monokai.js", "sha384-6n33Rx97ikbTD/59t3MaOjZr+2YlPm+OclIyf9Qv85se93NbaAvkrbDagVDwHU2l" },
+    { "theme-tomorrow_night.js", "sha384-wDwbhewf67S+uC0KeXAPFxz6bmHmxZlaOvz7eRUe0Ggbjawf2iuNCpSWZM1sIs/M" },
+    { "theme-dracula.js", "sha384-PpSxOZCA3YQeDNMflckvWI+Y9298TZIEKgRRNjnYuse3YEHvexbrjRUYx13nwO9I" },
+    { "theme-one_dark.js", "sha384-c0eGjHhmjnyuFRv7CXeawT1SYYy+q+T9u7aHebzbrGlxR7MsBzyqvD8/30yEQ++s" },
+    { "theme-github_dark.js", "sha384-nVN4dDa6II1ZZTsJtfakyBgggY8lekRI+d6il4HOw6zebuk7BVnXwY+gkK9dYfg5" },
+    { "theme-nord_dark.js", "sha384-dpfX/3H3m6u0rNwWni9xDSd3rrnBZOmlML87fVP/VayOwwuPV3UIPYncm7VJuKDD" },
+    { "theme-gruvbox.js", "sha384-aVtp/qu/71VzVuOaIbUgevwtDJbyB7+hIiWZBGgZqUa5A5i0TrXOgXab1usjhKFY" }
+}
+local ACE_CORE = { "ace.js", "sha384-OQ+DmXuGvnH7Y4swub2P3D/ZvkbfhWR9druiI/uJdNoPy1SlJxaPE30p9EdK2Rul" }
+
+local function scriptTag( row )
+    return "<script src=\"" .. ACE_BASE .. row[1] .. "\" integrity=\"" .. row[2] .. "\" crossorigin=\"anonymous\"></script>\n"
+end
+
+local function aceTags()
+    local out = { scriptTag( ACE_CORE ) }
+    -- if ace.js didn't load (offline or failed its hash), give the other files a harmless ace.define to call
+    out[#out + 1] = "<script>if (typeof ace === \"undefined\") { window.cnsxNoAce = true; window.ace = { define: function(){}, require: function(){} }; }</script>\n"
+    for _, row in ipairs( ACE_FILES ) do
+        out[#out + 1] = scriptTag( row )
+    end
+
+    return table.concat( out )
+end
+
 function CNSX.GuessMode( path )
     path = string.lower( tostring( path or "" ) )
     -- saved .lua files come back as name.lua.txt; keep Lua highlighting for them
@@ -64,9 +102,7 @@ html,body{margin:0;height:100%;background:#0c0c0e;color:#eee;overflow:hidden;}
 </style>
 </head><body>
 <div id="ed"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ace.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ext-language_tools.js"></script>
-<script>
+]==] .. aceTags() .. [==[<script>
 (function(){
 var W = window;
 var PREFS = ]==] .. boot .. [==[;
@@ -200,6 +236,8 @@ function notifyCursor(){
 }
 
 function setupAce(){
+  // everything the IDE uses was preloaded with integrity hashes; never fetch another module
+  try { ace.config.set("packaged", false); ace.config.setLoader(function(name, cb){ cb(null, undefined); }); } catch (e) {}
   ed = ace.edit("ed");
   ed.setShowPrintMargin(false);
   ed.$blockScrolling = Infinity;
@@ -282,15 +320,17 @@ function makeSession(text, mode){
   return s;
 }
 function setSessionMode(s, mode){
-  if (mode === "glua") s.setMode(gluaMode || "ace/mode/lua");
-  else s.setMode(MODES[mode] ? mode : "ace/mode/text");
+  try {
+    if (mode === "glua") s.setMode(gluaMode || "ace/mode/lua");
+    else s.setMode(MODES[mode] ? mode : "ace/mode/text");
+  } catch (e) {}
 }
 
 function applyPrefs(p){
   PREFS = p || PREFS;
   if (ed) {
     ed.setFontSize(PREFS.fontSize || 13);
-    ed.setTheme("ace/theme/" + (PREFS.theme || "twilight"));
+    try { ed.setTheme("ace/theme/" + (PREFS.theme || "twilight")); } catch (e) {}
     for (var id in sessions) sessions[id].setUseWrapMode(PREFS.wrap !== false);
   } else if (fb) {
     fb.style.fontSize = (PREFS.fontSize || 13) + "px";
@@ -326,7 +366,7 @@ function setupFallback(){
     if (hk) { ev.preventDefault(); call("hotkey", hk); }
   });
   applyPrefs(PREFS);
-  info("Ace editor could not load (no internet or cdnjs blocked); using the plain editor");
+  info("Ace editor could not load (no internet, cdnjs blocked, or a file failed its integrity check); using the plain editor");
 }
 
 function fbFind(q, back, cs){
@@ -343,7 +383,7 @@ function fbLineStart(n){
   return off;
 }
 
-if (typeof ace === "undefined") setupFallback(); else setupAce();
+if (W.cnsxNoAce || typeof ace === "undefined" || !ace.edit) setupFallback(); else setupAce();
 
 // ---- API used by Lua ----
 W.cnsxOpen = function(id, text, mode, force, ro){

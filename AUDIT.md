@@ -9,7 +9,7 @@ This round started from the uploaded 1.5.2, which added an **autosave** feature 
 - **I read every file in full**, and compared the Derma/DHTML code with the base-game source (`dhtml.lua`, `dlistview.lua`, `dtextentry.lua`, `util.lua`).
 - **Compile and API checks:** every file compiles under LuaJIT, the Lua runtime GMod uses. A GMod API checker found no unknown functions, realm mistakes or unregistered network messages. I looked up every new API call against the wiki mirror.
 - **`tests/cnsx_e2e.lua` (112 checks).** This test loads the real server file and the real client files into simulated GMod environments: one server and three clients (two superadmins and one ordinary player). A fake network connects them, and the test clicks through the IDE. Run it with `luajit tests/cnsx_e2e.lua`.
-- **`tests/editor_page.js` (49 checks).** This test loads the real editor page in headless Chromium, using the same Ace 1.32.6 build the addon loads from cdnjs (taken from npm). It checks GLua highlighting, autocomplete, shortcuts, the Lua bridge, find/replace, prefs and the offline fallback. The steps to run it are at the top of the file.
+- **`tests/editor_page.js` (56 checks).** This test loads the real editor page in headless Chromium, using the same Ace 1.32.6 build the addon loads from cdnjs (taken from npm). It checks GLua highlighting, autocomplete, shortcuts, the Lua bridge, find/replace, prefs and the offline fallback. The steps to run it are at the top of the file.
 - **An independent review pass** read the finished code from scratch. Its findings are listed below and were fixed, with a regression check for each. Where I could, I confirmed a check fails when its fix is reverted.
 - **Not tested on a live server.** The harness simulates GMod. How things look on screen, and Chromium-in-GMod quirks, still need a real client.
 
@@ -56,7 +56,25 @@ Autosave has been rebuilt. Every tab is kept as a **local draft** about 1.5 s af
 | R10 | Low | The idle-lock countdown used the time left at open, not the idle window, and ignored the 12 h cap. | The server sends the idle window and the hard cap; the client counts down from its last command. |
 | R11 | Low | A pending "close after save" stayed set if the save was never sent, so a later save closed the tab. | It is cleared on every path where the save doesn't go out. |
 
-**Not changed (your call):** the reviewer suggested adding subresource-integrity hashes to the two Ace `<script>` tags. Anything running in the editor page can ask Lua to run the editor text on the server, so a tampered cdnjs file would be dangerous. I couldn't fetch the cdnjs files from here to confirm their hashes. A wrong hash would block Ace for every admin, leaving only the plain editor. Adding it is a two-line change once the hashes are taken from cdnjs.
+### Ace pinned with subresource integrity
+
+Anything running in the editor page can ask Lua to run the editor text on the server, so the page's scripts are now hash-pinned:
+
+- **All 15 Ace files carry a SHA-384 integrity hash.** These are `ace.js`, `ext-language_tools.js`, the 5 mode files and the 8 theme files. The hashes are of the `ace-builds@1.32.6` `src-min-noconflict` files, which is the build cdnjs serves. A file that doesn't match is refused by the browser and never runs.
+- **Every mode and theme the IDE uses is preloaded with its hash.** Ace's own on-demand loader is switched off, so Ace can't fetch any other file without a hash check.
+- **A blocked `ace.js` falls back to the plain editor.** That happens offline, when cdnjs is unreachable, or when a hash doesn't match. The log says why.
+- **Tested in Chromium:** the test serves the files the way cdnjs does (with its CORS header), so the hashes are really enforced.
+  - With the real files, every hash matches and Ace loads.
+  - All 8 themes and 7 modes work, and nothing beyond the 15 files is ever fetched.
+  - An appended line in `ace.js` or `mode-lua.js` is blocked and never runs.
+
+**Please verify once against cdnjs itself.** It couldn't be reached from where this was built. If cdnjs's bytes differ from npm's, the editor would quietly fall back to plain text. Each line printed by this should match the hash in `cl_editor.lua`:
+
+```bash
+for f in ace ext-language_tools mode-lua mode-html mode-xml mode-json mode-markdown theme-twilight theme-monokai theme-tomorrow_night theme-dracula theme-one_dark theme-github_dark theme-nord_dark theme-gruvbox; do echo "$f.js sha384-$(curl -s https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/$f.js | openssl dgst -sha384 -binary | openssl base64 -A)"; done
+```
+
+In game, an Ace editor with highlighting means the hashes match. The plain editor plus a log line about the integrity check means they don't.
 
 ## Security review
 
@@ -69,10 +87,10 @@ Users are trusted owners/superadmins, so "an unlocked admin can run any Lua" is 
 | S3 | Passwords | A **new** master password must be 8+ characters. Old shorter passwords still unlock. Lockouts (5 bad tries → 30 s) are now written to the audit log. |
 | S4 | Sessions | The fixed 45-minute unlock is now an **idle** timeout (`cnsx_session_min`, 5–240 min) with a hard 12 h cap. A **Lock** button ends your session immediately. `cnsx_lockall` (server console only) ends everyone's. |
 | S5 | Remote files | When an admin lists, opens or writes another superadmin's DATA, that player gets a chat line saying who did it and what. |
-| S6 | Editor page | Completion names from `_G` are filtered to plain identifiers, and completion docs are HTML-escaped. All Lua→JS values go through JSON encoding. The F1 wiki link only accepts `[A-Za-z0-9_.:]`. Lua access in the HTML panel stays off. |
+| S6 | Editor page | All Ace scripts are pinned with SHA-384 integrity hashes, and loading unhashed modules is blocked (see above). Completion names from `_G` are filtered to plain identifiers, and completion docs are HTML-escaped. All Lua→JS values go through JSON encoding. The F1 wiki link only accepts `[A-Za-z0-9_.:]`. Lua access in the HTML panel stays off. |
 | S7 | Audit log | Delete, rename and mkdir, autosaves (tagged), session lock and lockouts are now logged, in addition to everything logged before. |
 
-**Risks you accept by design (unchanged):** an unlocked session controls the whole server. It can read `GAME/cfg/server.cfg` (`rcon_password`) and run console commands. The master password crosses the network unencrypted, because GMod net messages are not encrypted. The first superadmin to open CNSX sets the password, so set it from the server console (`cnsx_setpass`) first. The editor loads Ace from cdnjs; if that is blocked, a plain-text editor takes over. Anyone with Lua access can edit or delete the audit log.
+**Risks you accept by design (unchanged):** an unlocked session controls the whole server. It can read `GAME/cfg/server.cfg` (`rcon_password`) and run console commands. The master password crosses the network unencrypted, because GMod net messages are not encrypted. The first superadmin to open CNSX sets the password, so set it from the server console (`cnsx_setpass`) first. The editor loads Ace from cdnjs, hash-pinned; if that is blocked or a hash fails, a plain-text editor takes over. Anyone with Lua access can edit or delete the audit log.
 
 ## New IDE features
 

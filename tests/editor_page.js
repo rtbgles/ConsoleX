@@ -1,4 +1,6 @@
 // Drives the real editor page (CNSX.EditorHTML) in headless Chromium against a local copy of Ace 1.32.6.
+// Requests to cdnjs are answered from that copy (with the CORS header cdnjs sends), so the page's
+// subresource-integrity hashes are really enforced, and files can be tampered with or blocked per test.
 //   luajit tests/dump_editor_html.lua /tmp/editor.html
 //   npm pack ace-builds@1.32.6 && tar xzf ace-builds-1.32.6.tgz      (gives package/src-min-noconflict)
 //   node tests/editor_page.js /tmp/editor.html package/src-min-noconflict
@@ -19,13 +21,29 @@ function check(name, cond) {
 const BRIDGE = `window.cnsx = {}; window.calls = [];
 ["code","changed","cursor","hotkey","info"].forEach(function(n){ cnsx[n] = function(a, b, c){ calls.push([n, a, b, c]); }; });`;
 
-async function load(browser, base) {
+// opts.offline: cdnjs unreachable; opts.tamper: { "ace.js": "extra code" } appended to a served file
+async function load(browser, opts) {
+  opts = opts || {};
   const dir = fs.mkdtempSync(path.join(path.dirname(htmlPath), "page-"));
   const file = path.join(dir, "editor.html");
-  fs.writeFileSync(file, html.split(CDN).join(base));
+  fs.writeFileSync(file, html);
   const page = await browser.newPage();
   const errors = [];
+  const requests = [];
   page.on("pageerror", (e) => errors.push(String(e)));
+  await page.route("**/*", (route) => {
+    const url = route.request().url();
+    if (url.startsWith("file://")) return route.continue();
+    requests.push(url);
+    if (opts.offline || !url.startsWith(CDN)) return route.abort();
+    const name = url.slice(CDN.length);
+    const local = path.join(aceDir, name);
+    if (!fs.existsSync(local)) return route.fulfill({ status: 404, body: "" });
+    let body = fs.readFileSync(local, "utf8");
+    if (opts.tamper && opts.tamper[name]) body += opts.tamper[name];
+    return route.fulfill({ status: 200, body, headers: { "content-type": "application/javascript", "access-control-allow-origin": "*" } });
+  });
+  page.requests = requests;
   await page.goto("file://" + file);
   await page.evaluate(BRIDGE);
   await page.evaluate(() => window.cnsxReady && cnsxReady());
@@ -36,8 +54,11 @@ async function load(browser, base) {
   const browser = await chromium.launch();
 
   // ---------- Ace build ----------
-  const { page, errors } = await load(browser, "file://" + path.resolve(aceDir) + "/");
-  check("Ace loads from the CDN file names used by the page", await page.evaluate(() => window.cnsxIsAce && cnsxIsAce()));
+  const { page, errors } = await load(browser);
+  check("Ace loads with every integrity hash matching ace-builds 1.32.6", await page.evaluate(() => window.cnsxIsAce && cnsxIsAce()));
+  const tagged = (html.match(/<script src="[^"]+" integrity="sha384-[^"]+" crossorigin="anonymous">/g) || []).length;
+  const allTags = (html.match(/<script src=/g) || []).length;
+  check("every external script carries an integrity hash", tagged === allTags && tagged === 15);
   check("boot prefs applied (font size, theme)", await page.evaluate(() => {
     const ed = ace.edit("ed");
     return ed.getFontSize() === 14 && /monokai/.test(ed.getTheme());
@@ -160,12 +181,44 @@ async function load(browser, base) {
   check("prefs apply live", await page.evaluate(() => { cnsxPrefs({ fontSize: 20, theme: "dracula", wrap: false }); const ed = ace.edit("ed"); return ed.getFontSize() === 20 && !ed.session.getUseWrapMode(); }));
   check("dropping a session frees it", await page.evaluate(() => { cnsxDrop("t4"); cnsxOpen("t4", "fresh", "ace/mode/text", false); return ace.edit("ed").getValue() === "fresh"; }));
   check("forced reload replaces the text", await page.evaluate(() => { cnsxOpen("t4", "reloaded", "ace/mode/text", true); return ace.edit("ed").getValue() === "reloaded"; }));
+  // every theme and mode the prefs/tabs can pick, plus one that was never preloaded
+  const before = page.requests.length;
+  const themes = ["twilight", "monokai", "tomorrow_night", "dracula", "one_dark", "github_dark", "nord_dark", "gruvbox"];
+  const themed = await page.evaluate(async (themes) => {
+    const ed = ace.edit("ed"), ok = [];
+    for (const t of themes) { cnsxPrefs({ fontSize: 13, theme: t, wrap: true }); await new Promise((r) => setTimeout(r, 50)); ok.push(ed.renderer.theme && ed.renderer.theme.cssClass === "ace-" + t.replace(/_/g, "-")); }
+    return ok;
+  }, themes);
+  check("all 8 preloaded themes apply", themed.every(Boolean));
+  const moded = await page.evaluate(async () => {
+    const out = {};
+    for (const m of ["ace/mode/javascript", "ace/mode/html", "ace/mode/css", "ace/mode/json", "ace/mode/xml", "ace/mode/markdown", "ace/mode/text"]) {
+      cnsxOpen("m-" + m, "x", m, false); await new Promise((r) => setTimeout(r, 50));
+      out[m] = ace.edit("ed").session.getMode().$id;
+    }
+    try { ace.edit("ed").setTheme("ace/theme/chrome"); } catch (e) {}
+    cnsxOpen("m-x", "x", "ace/mode/python", false);
+    await new Promise((r) => setTimeout(r, 300));
+    return out;
+  });
+  check("all preloaded modes apply", Object.keys(moded).every((m) => moded[m] === m));
+  check("no other Ace file is ever fetched (theme/mode not preloaded stays unloaded)", page.requests.length === before && page.requests.every((u) => u.startsWith(CDN)) && page.requests.length === 15);
   check("no page errors with Ace", errors.length === 0);
   if (errors.length) console.log(errors.join("\n"));
   await page.close();
 
   // ---------- fallback (CDN unreachable) ----------
-  const fbLoad = await load(browser, "file:///nonexistent/ace/");
+  // a tampered core file is refused by the browser and never runs
+  const bad = await load(browser, { tamper: { "ace.js": "\nwindow.pwned = 1;" } });
+  check("tampered ace.js is blocked by its hash -> plain editor", await bad.page.evaluate(() => !window.pwned && !cnsxIsAce() && !!document.getElementById("fb")));
+  check("tampered ace.js: the other files load without errors", bad.errors.length === 0);
+  await bad.page.close();
+  const badMode = await load(browser, { tamper: { "mode-lua.js": "\nwindow.pwned = 1;" } });
+  await badMode.page.waitForTimeout(300);
+  check("tampered mode file is blocked and not fetched again", await badMode.page.evaluate(() => !window.pwned && cnsxIsAce()) && badMode.page.requests.filter((u) => u.endsWith("mode-lua.js")).length === 1);
+  await badMode.page.close();
+
+  const fbLoad = await load(browser, { offline: true });
   const fb = fbLoad.page;
   check("fallback editor appears when Ace can't load", await fb.evaluate(() => !!document.getElementById("fb") && !cnsxIsAce()));
   check("the user is told Ace failed (queued until the bridge is ready)", await fb.evaluate(() => calls.some((c) => c[0] === "info" && /could not load/.test(c[1]))));
@@ -181,7 +234,7 @@ async function load(browser, base) {
   await fb.keyboard.type("x");
   await fb.waitForTimeout(400);
   check("fallback typing reports a change", await fb.evaluate(() => calls.some((c) => c[0] === "changed")));
-  check("no page errors in fallback", fbLoad.errors.length === 0);
+  check("no page errors in fallback (offline)", fbLoad.errors.length === 0);
   if (fbLoad.errors.length) console.log(fbLoad.errors.join("\n"));
 
   await browser.close();
