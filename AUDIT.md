@@ -1,4 +1,103 @@
-# ConsoleX (CNSX) audit: 1.5.1 → 1.5.2
+# ConsoleX (CNSX) 1.6.0 audit
+
+ConsoleX is a Garry's Mod addon that gives superadmins an in-game Lua IDE. They unlock it with a master password. Then they can run code on the server or on clients, and browse and edit files.
+
+This round started from the uploaded 1.5.2, which added an **autosave** feature on top of the last audited version. The upload is committed unchanged ("Import ConsoleX 1.5.2 upload"), so `git diff` from that commit shows this round's changes.
+
+## How it was checked
+
+- **I read every file in full**, and compared the Derma/DHTML code with the base-game source (`dhtml.lua`, `dlistview.lua`, `dtextentry.lua`, `util.lua`).
+- **Compile and API checks:** every file compiles under LuaJIT, the Lua runtime GMod uses. A GMod API checker found no unknown functions, realm mistakes or unregistered network messages. I looked up every new API call against the wiki mirror.
+- **`tests/cnsx_e2e.lua` (103 checks).** This test loads the real server file and the real client files into simulated GMod environments: one server and three clients (two superadmins and one ordinary player). A fake network connects them, and the test clicks through the IDE. Run it with `luajit tests/cnsx_e2e.lua`.
+- **`tests/editor_page.js` (47 checks).** This test loads the real editor page in headless Chromium, using the same Ace 1.32.6 build the addon loads from cdnjs (taken from npm). It checks GLua highlighting, autocomplete, shortcuts, the Lua bridge, find/replace, prefs and the offline fallback. The steps to run it are at the top of the file.
+- **An independent review pass** read the finished code from scratch; its findings were fixed and re-tested.
+- **Not tested on a live server.** The harness simulates GMod. How things look on screen, and Chromium-in-GMod quirks, still need a real client.
+
+## Bugs in the uploaded autosave
+
+| # | Severity | Issue |
+|---|----------|-------|
+| A1 | **Critical** | **It broke Run and Save.** It registered `cnsx.onChange` from a `Think` hook on the first frame, before the page had loaded. The base-game `DHTML:AddFunction` marks the `cnsx` object as created on the first call. So the real bridge (`cnsx.code`) registered later in `OnDocumentReady` never got created in the page. Run, Save and Check then fell back to the tab's *last stored* text, not what you had typed. This is the same bug round 3 fixed. |
+| A2 | **Critical** | **Every autosave threw a Lua error.** `doAutosave` called `comboData`, which is declared further down the file. At that point the name looks up a global that doesn't exist. |
+| A3 | **High** | **Opening a file wrote files.** Loading text into the editor fires Ace's change event, so simply *viewing* a file triggered a save. Opening `cfg/server.cfg` from GAME would have written a copy to `DATA/cfg/server.cfg.txt`, including `rcon_password`. Viewing any `.lua` file would have created a `.lua.txt` copy next to it. |
+| A4 | **High** | **It saved to the wrong place.** It used the Browse dropdown's *current* root, not the tab's own. A tab opened from Player DATA (another admin's PC) was written to server DATA. A server file was written to your own PC if you had switched Browse to My DATA. |
+| A5 | Medium | **It cancelled clicks.** It shared the single editor-read callback slot, so an autosave firing right after you clicked SV Run silently replaced the Run's callback. Nothing ran. |
+| A6 | Low | It sent every tab (up to 62 KB) to the server on every autosave, and left a `Think` hook running every frame forever. |
+
+Autosave has been rebuilt. Every tab is kept as a **local draft** about 1.5 s after you stop typing. The drafts are backed up to the server when you close the window, and once a minute while something has changed. **Writing the actual file is opt-in** (Prefs → Autosave files, off by default). It only ever writes the tab's *own* file, in server DATA or My DATA. It never writes a GAME, LUA or player file, and it only writes when the text actually differs from the last save.
+
+## Bugs found in the existing code
+
+| # | Severity | Issue | Fix |
+|---|----------|-------|-----|
+| 1 | **High** | **Closing a tab overwrote the next tab.** `closeTab` removed the tab, then read the editor text into `tabs[active]`. After the removal, that index points at the next tab. So closing a tab replaced its neighbour's contents with the closed tab's text. | The editor text is read first, then the tab is removed and the active index adjusted. Each tab now has its own Ace session, so undo history and cursor position survive tab switches. |
+| 2 | **High** | **Save wrote to whatever the Path box said.** Clicking a folder in the file list (the Path box became `consolex/sub`) and then pressing Save wrote the tab to `consolex/sub.txt` and renamed the tab. | Save writes the tab's own file. Unsaved tabs, and GAME/LUA tabs, open **Save As**, which asks for a path. The tab then follows the real saved name (e.g. `x.lua.txt`). Remote tabs remember which player they came from. |
+| 3 | **High** | **Clicks were silently dropped.** The server ignored any command less than 0.05 s after the previous one. Opening the IDE sends three at once, so the player list was always dropped. Refresh sent two, so the file list was dropped. | Replaced with a token bucket: bursts of up to 40 go through, refilling at 20/s. Non-admins are still rejected before anything is read. |
+| 4 | **High** | **Large code or files failed silently.** Messages were plain JSON capped at 62 KB, and JSON escaping roughly doubles code full of quotes and newlines. Anything over the cap was replaced by `{"err":...}` *without* the action name, so the server ignored it. 40 KB of code could just not run. Files over 62 KB opened truncated, and saving them truncated the file on disk. | Payloads are now compressed with LZMA (`util.Compress`; typical Lua code shrinks 4–6×). The receiver caps decompression at 2 MB (`util.Decompress` `maxSize`). Anything that still doesn't fit is **reported** ("run_sv not sent: payload too large"). Files over 512 KB open **read-only** and can't be saved back truncated. Binary files are refused. |
+| 5 | Medium | **`!=`, `//`, `&&`, `continue` and other GLua syntax showed red error markers.** Ace's Lua checker only understands plain Lua 5.1. | Ace's checker is turned off. A GLua highlighting mode was added. Syntax errors now come from GMod's own `CompileString`, run locally as you type (it compiles only and never runs anything). |
+| 6 | Medium | **Autocomplete inserted `player.player.GetAll`.** The completer matched the whole `player.GetAll` against the word after the dot and inserted all of it. | The completer reads what is before the cursor. `lib.` offers that library's functions and `obj:` offers methods. |
+| 7 | Medium | **Inconsistent rule for receiving client code.** An `owner` or `root` group could open the IDE, but its client refused code pushed to it (the client checked only `IsSuperAdmin`). | One rule (`CNSX.Allowed`) is used everywhere: by the server's target checks, and by the client before running pushed code or serving its files. |
+| 8 | Medium | **The overhead banner drew in the skybox and depth passes**, and allocated colors every frame. It also kept retrying a missing material every frame. | It skips the depth and skybox passes and dormant players. Colors and the material are cached. |
+| 9 | Low | The `cnsx_session_min` convar was created on clients too, where it is meaningless. Closing the window saved the stored tab text, not the live editor text. The list silently stopped at 160 entries. | Fixed. The list now goes up to 1000 entries and says when it is cut off. |
+
+## Security review
+
+Users are trusted owners/superadmins, so "an unlocked admin can run any Lua" is by design. What matters is that **nobody else** can get in, and that one admin's session can't be faked by another client.
+
+| # | Area | Change |
+|---|------|--------|
+| S1 | Network | Every network message is checked for permission **before** it is decompressed or decoded. Decompression is capped (2 MB), so a decompression bomb can't fill memory. Malformed packets are ignored, and the tests send garbage to prove it. |
+| S2 | Client results | The new "client replies" (CL All / On Ply output coming back) are only accepted from players the server actually sent that code to, for that run id, within 30 s. Anything else is dropped: unsolicited replies, replies from non-admins, replies to old runs. |
+| S3 | Passwords | A **new** master password must be 8+ characters. Old shorter passwords still unlock. Lockouts (5 bad tries → 30 s) are now written to the audit log. |
+| S4 | Sessions | The fixed 45-minute unlock is now an **idle** timeout (`cnsx_session_min`, 5–240 min) with a hard 12 h cap. A **Lock** button ends your session immediately. `cnsx_lockall` (server console only) ends everyone's. |
+| S5 | Remote files | When an admin lists, opens or writes another superadmin's DATA, that player gets a chat line saying who did it and what. |
+| S6 | Editor page | Completion names from `_G` are filtered to plain identifiers, and completion docs are HTML-escaped. All Lua→JS values go through JSON encoding. The F1 wiki link only accepts `[A-Za-z0-9_.:]`. Lua access in the HTML panel stays off. |
+| S7 | Audit log | Delete, rename and mkdir, autosaves (tagged), session lock and lockouts are now logged, in addition to everything logged before. |
+
+**Risks you accept by design (unchanged):** an unlocked session controls the whole server. It can read `GAME/cfg/server.cfg` (`rcon_password`) and run console commands. The master password crosses the network unencrypted, because GMod net messages are not encrypted. The first superadmin to open CNSX sets the password, so set it from the server console (`cnsx_setpass`) first. The editor loads Ace from cdnjs; if that is blocked, a plain-text editor takes over. Anyone with Lua access can edit or delete the audit log.
+
+## New IDE features
+
+**Running code**
+- `print`/`Msg`/`MsgN`/`MsgC`/`ErrorNoHalt` output is captured into the log (it still reaches the console too).
+- Return values are shown, and tables are pretty-printed (3 levels, capped).
+- Errors include a stack trace and mark the line in the editor.
+- **Run selection:** with text selected, Run/Check use only the selection (can be turned off in Prefs).
+- **CL All / On Ply / Both report back:** each client's result and output appears in your log as `client <name>`.
+- **Quick Lua line** under the log: an expression shows its value, a statement just runs. SV/CL toggle, Up/Down history.
+- **Run history** (Hist): the last 40 runs, saved locally; pick one to open it in a tab.
+- **Live error feed:** Lua errors on the server (for example from a hook your code added) appear in open IDEs, rate-limited and de-duplicated. Turn it off with `cnsx_error_feed 0`. Client errors appear in your own log.
+
+**Editor**
+- GLua highlighting: `//` and `/* */` comments, `!=`, `&&`, `||`, `!`, `continue`.
+- Live syntax check using GMod's own compiler.
+- Autocomplete built from the **real** API of both realms, tagged SV/CL/SH. `lib.` lists its functions, `obj:` lists methods with their class, and local words, Lua keywords and GLua snippets (`hook`, `netr`, `nets`, `timer`, `ccmd`, `forp`, `trace`, `frame`…) are included.
+- **F1** opens the wiki page for the word under the cursor (`hook.Add`, `ply:Nick` → `Player:Nick`).
+- Undo history and cursor position kept per tab. Unsaved tabs show `*`, and closing one asks Save / Discard / Cancel.
+- Find/replace with match-case, regex and whole-word toggles, and a match count.
+- Status bar: file, Ln/Col, modified, syntax error, and the idle-lock countdown.
+- Prefs: font size, theme (8 dark themes), word wrap, live syntax check, run selection, autosave files.
+- If cdnjs can't be reached, a plain-text editor with the same shortcuts takes over, and the log says so.
+
+**Keyboard shortcuts:** Ctrl+Enter run on server · Ctrl+Shift+Enter run on own client · Ctrl+S save · Ctrl+Shift+S save as · Ctrl+F find · Ctrl+G go to line · Ctrl+T new tab · Ctrl+W close tab · Ctrl+Tab / Ctrl+Shift+Tab switch tabs · Ctrl+/ comment · F1 wiki · Esc closes find.
+
+**Files**
+- Right-click the file list for Open, Run on server, Copy path, Rename/move, Delete (with confirmation), New file, New folder, and Find in files. Writing is limited to server DATA and My DATA, and the server versions are audited.
+- **Find in files** (Grep button or right-click) searches server DATA, GAME or LUA, or My DATA. It runs a few milliseconds per tick, so a big search never freezes the server. It is capped at 6000 files and 300 hits. Prefix the search with `re:` for a Lua pattern or `cs:` for case-sensitive. Click a hit to open the file at that line.
+- The file list shows sizes, and a file path in the Path box lists its folder.
+
+**New console commands / convars:** `cnsx_lockall` (server console), `cnsx_error_feed` (0/1). `cnsx_session_min` is now the idle timeout.
+
+## Known limits
+
+- An infinite loop in server code still freezes the server. LuaJIT doesn't run debug hooks inside compiled loops, so there is no reliable way to time out a run.
+- `Cmd` output goes to the server console. GMod gives Lua no way to capture it.
+- Find in files skips files over 1 MB and only searches text extensions (`lua`, `txt`, `json`, `cfg`, …).
+- The server backup of tabs skips any tab over 32 KB. Those stay in the local drafts on that PC, and the log says so once.
+
+---
+
+# Earlier rounds: 1.5.1 → 1.5.2
 
 ConsoleX is a Garry's Mod addon that gives superadmins an in-game Lua IDE. They unlock it with a master password and can then run code on the server or on clients and browse and edit files.
 

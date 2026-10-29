@@ -46,7 +46,7 @@ CNSX.Theme.ok = CNSX.Theme.ok or Color( 80, 200, 110 )
 T = CNSX.Theme
 
 local function logoMat()
-    if CNSX._logo and not CNSX._logo:IsError() then
+    if CNSX._logo then
         return CNSX._logo
     end
     local mat = Material( "consolex/cnsx_banner.png", "smooth noclamp vertexalpha" )
@@ -65,7 +65,7 @@ function CNSX.DrawLogo( x, y, w, h )
         surface.DrawTexturedRect( x, y, w, h )
         return true
     end
-    draw.SimpleText( "CNSX", "CNSX_Title", x + 4, y + h * 0.5, Color( 80, 150, 255 ), TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
+    draw.SimpleText( "CNSX", "CNSX_Title", x + 4, y + h * 0.5, T.accent, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
     return false
 end
 
@@ -101,6 +101,10 @@ function CNSX.SkinList( list )
 end
 
 local COMBO_HIDDEN = Color( 0, 0, 0, 0 )
+local EDGE_HOT = Color( 180, 180, 190 )
+local EDGE = Color( 70, 70, 78 )
+local SUBTITLE = Color( 160, 190, 240 )
+local CLOCK = Color( 140, 170, 220 )
 
 -- fully self-drawn: background + border + label + chevron, so the box is visible on the dark panel
 -- whatever the skin does (the old version relied on a fill nearly identical to the panel behind it)
@@ -385,11 +389,11 @@ function FRAME:Paint( w, h )
     surface.DrawOutlinedRect( 0, 0, w, minBar and h or 36 )
     CNSX.DrawLogo( 8, 2, minBar and 120 or 168, minBar and 24 or 32 )
     if not minBar then
-        draw.SimpleText( self._subtitle or ( "v" .. tostring( CNSX.Version ) ), "CNSX_Tiny", 184, 19, Color( 160, 190, 240 ), TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
+        draw.SimpleText( self._subtitle or ( "v" .. tostring( CNSX.Version ) ), "CNSX_Tiny", 184, 19, SUBTITLE, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
     else
         draw.SimpleText( "CNSX  hold C and click (or !cnsx) to restore", "CNSX_Tiny", 140, h * 0.5, T.muted, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
     end
-    draw.SimpleText( os.date( "%H:%M:%S" ), "CNSX_Tiny", w - 128, minBar and h * 0.5 or 19, Color( 140, 170, 220 ), TEXT_ALIGN_RIGHT, TEXT_ALIGN_CENTER )
+    draw.SimpleText( os.date( "%H:%M:%S" ), "CNSX_Tiny", w - 128, minBar and h * 0.5 or 19, CLOCK, TEXT_ALIGN_RIGHT, TEXT_ALIGN_CENTER )
     local flash = CNSX._flash
     if flash then
         local p = ( SysTime() - flash.t ) / ( flash.dur or 0.85 )
@@ -429,7 +433,7 @@ function BTN:Paint( w, h )
         col = T.accent
     end
     draw.RoundedBox( 0, 0, 0, w, h, col )
-    surface.SetDrawColor( self:IsHovered() and Color( 180, 180, 190 ) or Color( 70, 70, 78 ) )
+    surface.SetDrawColor( self:IsHovered() and EDGE_HOT or EDGE )
     surface.DrawOutlinedRect( 0, 0, w, h )
     draw.SimpleText( self:GetText() or "", "CNSX_Body", w * 0.5, h * 0.5, T.text, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER )
     return true
